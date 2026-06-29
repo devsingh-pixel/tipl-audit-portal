@@ -1,7 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
 from pypdf import PdfReader
-import urllib.parse
 
 # Page Configuration
 st.set_page_config(page_title="TIPL TE Rules Fully-Auto Audit Portal", layout="wide")
@@ -9,19 +8,10 @@ st.set_page_config(page_title="TIPL TE Rules Fully-Auto Audit Portal", layout="w
 st.title("🛄 TIPL Travel Expense Fully-Automatic Audit Portal")
 st.write("Upload tour bills or expense logs. The AI will automatically fetch Designation, City Category, and audit Conveyance based on [TIPL TE Rules (w.e.f. 1 April 2025)](http://live.tipl.com/pdf/TIPL_TE%20Rules_w.e.f.%201%20April.2025.pdf).")
 
-# Sidebar - ONLY Gender and API Key required now!
+# Sidebar - ONLY Gender and API Key required! (Manual inputs minimized)
 st.sidebar.header("📋 Setup & Manual Inputs")
 api_key = st.sidebar.text_input("Enter Google AI Studio API Key:", type="password")
 gender = st.sidebar.selectbox("Gender of Employee:", ["Male", "Female"])
-
-st.sidebar.markdown("---")
-st.sidebar.header("🗺️ Quick Distance Verify (Google Maps)")
-origin = st.sidebar.text_input("From (Source):", placeholder="e.g., Roza chowk")
-destination = st.sidebar.text_input("To (Destination):", placeholder="e.g., Railway station")
-
-if origin and destination:
-    maps_url = f"https://www.google.com/maps/dir/{urllib.parse.quote(origin)}/{urllib.parse.quote(destination)}"
-    st.sidebar.markdown(f"🔗 [Verify Distance on Google Maps]({maps_url})")
 
 uploaded_file = st.file_uploader("Upload Tour Bill / Expense Text / PDF", type=["pdf", "txt"])
 
@@ -97,7 +87,6 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
     [List specific violations, over-claimed amounts, or missing details clearly.]
     """
     
-    # Fixed model name format to prevent 404 version issues
     model = genai.GenerativeModel('gemini-1.5-flash')
     
     with st.spinner("Analyzing text, fetching details and auditing conveyance..."):
