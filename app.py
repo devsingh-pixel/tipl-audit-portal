@@ -8,7 +8,7 @@ st.set_page_config(page_title="TIPL TE Rules Fully-Auto Audit Portal", layout="w
 st.title("🛄 TIPL Travel Expense Fully-Automatic Audit Portal")
 st.write("Upload tour bills or expense logs. The AI will automatically fetch Designation, City Category, and audit Conveyance based on [TIPL TE Rules (w.e.f. 1 April 2025)](http://live.tipl.com/pdf/TIPL_TE%20Rules_w.e.f.%201%20April.2025.pdf).")
 
-# Sidebar - ONLY Gender and API Key required! (Manual inputs minimized)
+# Sidebar - ONLY Gender and API Key required!
 st.sidebar.header("📋 Setup & Manual Inputs")
 api_key = st.sidebar.text_input("Enter Google AI Studio API Key:", type="password")
 gender = st.sidebar.selectbox("Gender of Employee:", ["Male", "Female"])
@@ -16,6 +16,7 @@ gender = st.sidebar.selectbox("Gender of Employee:", ["Male", "Female"])
 uploaded_file = st.file_uploader("Upload Tour Bill / Expense Text / PDF", type=["pdf", "txt"])
 
 if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
+    # Strict API initialization
     genai.configure(api_key=api_key)
     
     # Extract text from PDF
@@ -87,12 +88,20 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
     [List specific violations, over-claimed amounts, or missing details clearly.]
     """
     
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
     with st.spinner("Analyzing text, fetching details and auditing conveyance..."):
         try:
+            # Using absolute standard identifier format
+            model = genai.GenerativeModel('gemini-1.5-flash-latest')
             response = model.generate_content(prompt)
             st.subheader("📋 Final Audit Results")
             st.write(response.text)
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Error executing standard model: {e}. Trying alternative naming convention...")
+            try:
+                # Fallback format for strict environments
+                model_alt = genai.GenerativeModel(model_name='gemini-1.5-flash')
+                response_alt = model_alt.generate_content(prompt)
+                st.subheader("📋 Final Audit Results")
+                st.write(response_alt.text)
+            except Exception as e2:
+                st.error(f"Fallback failed as well: {e2}")
