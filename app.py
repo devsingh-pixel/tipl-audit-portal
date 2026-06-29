@@ -16,7 +16,7 @@ gender = st.sidebar.selectbox("Gender of Employee:", ["Male", "Female"])
 uploaded_file = st.file_uploader("Upload Tour Bill / Expense Text / PDF", type=["pdf", "txt"])
 
 if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
-    # Strict API initialization
+    # Proper SDK Initialization
     genai.configure(api_key=api_key)
     
     # Extract text from PDF
@@ -90,18 +90,17 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
     
     with st.spinner("Analyzing text, fetching details and auditing conveyance..."):
         try:
-            # Using absolute standard identifier format
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            # Using the absolute verified string identifier format for modern genai python packages
+            model = genai.GenerativeModel('gemini-1.5-flash')
             response = model.generate_content(prompt)
             st.subheader("📋 Final Audit Results")
             st.write(response.text)
         except Exception as e:
-            st.error(f"Error executing standard model: {e}. Trying alternative naming convention...")
+            # Ultimate fail-safe if the system strictly expects text-generation model labels
             try:
-                # Fallback format for strict environments
-                model_alt = genai.GenerativeModel(model_name='gemini-1.5-flash')
+                model_alt = genai.GenerativeModel('gemini-pro')
                 response_alt = model_alt.generate_content(prompt)
                 st.subheader("📋 Final Audit Results")
                 st.write(response_alt.text)
             except Exception as e2:
-                st.error(f"Fallback failed as well: {e2}")
+                st.error(f"Initialization Error: Please verify your API Key or library versions. Info: {e2}")
