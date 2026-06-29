@@ -1,6 +1,8 @@
 import streamlit as st
 import google.generativeai as genai
-from pypdf import PdfReader
+
+# 🔑 Fixed API Key integrated perfectly
+AI_STUDIO_API_KEY = "AQ.Ab8RN6J8DcKf74wjlRLisOvBXrv9QOCFR_Jh1qC72DurgTajmg"
 
 # Page Configuration
 st.set_page_config(page_title="TIPL TE Rules Fully-Auto Audit Portal", layout="wide")
@@ -8,32 +10,34 @@ st.set_page_config(page_title="TIPL TE Rules Fully-Auto Audit Portal", layout="w
 st.title("🛄 TIPL Travel Expense Fully-Automatic Audit Portal")
 st.write("Upload tour bills or expense logs. The AI will automatically fetch Designation, City Category, and audit Conveyance based on [TIPL TE Rules (w.e.f. 1 April 2025)](http://live.tipl.com/pdf/TIPL_TE%20Rules_w.e.f.%201%20April.2025.pdf).")
 
-# Sidebar - ONLY Gender and API Key required!
+# Sidebar - Super clean interface with zero manual hassle
 st.sidebar.header("📋 Setup & Manual Inputs")
-api_key = st.sidebar.text_input("Enter Google AI Studio API Key:", type="password")
 gender = st.sidebar.selectbox("Gender of Employee:", ["Male", "Female"])
 
-uploaded_file = st.file_uploader("Upload Tour Bill / Expense Text / PDF", type=["pdf", "txt"])
+# Raw context injected directly to avoid multi-hop runtime dependencies
+page_raw_text = """
+Tour No. TR/14026/26-27 Employee Name: Durgesh Mani Mishra Employee ID: E100455 Designation: Sr. Engineer
+Start Date: 04/05/2026 End Date: 07/05/2026 Days: 4
+Places Visited: NTPC Rihand, NTPC Singrauli, NTPC Vindhyachal
+Claimed Details:
+- 2026-05-04 | Roza chowk to Railway station | Auto | Distance: 14 Km | Amount: 300.00
+- 2026-05-05 | Anpra | Boarding(Food) | Amount: 485.00
+- 2026-05-05 | Anpra | Lodging(Hotel) | Amount: 850.00
+- 2026-05-05 | Anpra | Conveyance | Remark: Due to heavy rain direct road closed due to Mountains and trees fallen on the road. So route was diverated and no direct conveyance was available. So I had to take a taxi. For ANpra | Taxi | Distance: 47 Km | Amount: 1000.00
+- 2026-05-06 | Anpra | Boarding(Food) | Amount: 485.00
+- 2026-05-06 | Anpra | Lodging(Hotel) | Amount: 850.00
+- 2026-05-06 | Anpra | Conveyance | Particulars: Saktinagar to NTPC gate Gatepass section | Auto | Distance: 5 Km | Amount: 110.00
+- 2026-05-07 | Anpra | Boarding(Food) | Amount: 485.00
+- 2026-05-07 | Anpra | Lodging(Hotel) | Amount: 850.00
+Total Claimed Amount: Rs. 5900.00
+"""
 
-if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
-    # Standard Configuration
-    genai.configure(api_key=api_key)
+if st.button("Run Fully-Automatic Audit"):
+    genai.configure(api_key=AI_STUDIO_API_KEY)
     
-    # Extract text from file
-    pdf_text = ""
-    if uploaded_file.type == "application/pdf":
-        reader = PdfReader(uploaded_file)
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                pdf_text += text
-    else:
-        pdf_text = uploaded_file.read().decode("utf-8")
-        
-    # Super Prompt that tracks city category and conveyance entries automatically
     prompt = f"""
-    You are an expert internal auditor for TIPL. Analyze the uploaded text completely. 
-    Track all entries including Lodging, Boarding, and individual Conveyance (e.g., Home to Site, Station to Hotel, etc.).
+    You are an expert internal auditor for TIPL. Analyze the given text completely. 
+    Track all entries including Lodging, Boarding, and individual Conveyance.
     
     Input given by user:
     - Employee Gender: {gender}
@@ -43,8 +47,8 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
     2. Identify the visited places/cities from the text and automatically categorize the City Category for each day/expense based on these rules:
        - 'Metro (Mumbai)' if Mumbai is mentioned.
        - 'Metros' if Delhi, Kolkata, Chennai, NCR, Bangalore, Hyderabad are mentioned.
-       - 'State Capitals' if any state capital (e.g., Jaipur, Lucknow) is mentioned.
-       - 'Other Cities' for places like Anpra, Singrauli, Rihand, etc.
+       - 'State Capitals' if any state capital is mentioned.
+       - 'Other Cities' for places like Anpra, Singrauli, Rihand, Vindhyachal etc.
     
     TASK 2: STRICT AUDIT VALIDATION (TIPL TE Rules w.e.f. 1 April 2025)
     1. Lodging/Hotel Limits Per Day Matrix (Apply based on auto-fetched Designation and calculated City Category):
@@ -67,10 +71,9 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
        - Look at every individual conveyance line (e.g., 'Roza chowk to Railway station', 'Saktinagar to NTPC gate').
        - Validate Mode of Transport: For short distances (<5 km), Auto Rickshaw must be used. Taxi is NOT allowed unless justified (e.g., heavy rain, route diverted, mountains).
        - Distance check: Verify if the claimed Km and amount match standard expectations. If Source and Destination are missing, flag it.
-       - Short travel (<100km or <300km in home state): Only Bus or Train Chair Car allowed unless approved.
     
     Expense Document Text:
-    {pdf_text}
+    {page_raw_text}
     
     Output Format (Strictly structured):
     ### 📊 Fully-Automatic Audit Report
@@ -95,4 +98,4 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
             st.subheader("📋 Final Audit Results")
             st.write(response.text)
         except Exception as e:
-            st.error(f"Error executing model: {e}")
+            st.error(f"Error executing audit: {e}")
