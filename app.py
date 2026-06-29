@@ -16,10 +16,6 @@ gender = st.sidebar.selectbox("Gender of Employee:", ["Male", "Female"])
 uploaded_file = st.file_uploader("Upload Tour Bill / Expense Text / PDF", type=["pdf", "txt"])
 
 if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
-    # Explicitly bypass local/beta network overrides
-    import os
-    os.environ["STREAMLIT_SERVER_COOKIE_SECRET"] = "secure"
-    
     # Standard Configuration
     genai.configure(api_key=api_key)
     
@@ -92,12 +88,11 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
     [List specific violations, over-claimed amounts, or missing details clearly.]
     """
     
-    with St.spinner("Analyzing text, fetching details and auditing conveyance..."):
+    with st.spinner("Analyzing text, fetching details and auditing conveyance..."):
         try:
-            # Forcing standard generation call using direct core model string
-            model = genai.GenerativeModel(model_name='gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-1.5-flash')
             response = model.generate_content(prompt)
-            St.subheader("📋 Final Audit Results")
-            St.write(response.text)
+            st.subheader("📋 Final Audit Results")
+            st.write(response.text)
         except Exception as e:
-            St.error(f"Error executing model: {e}")
+            st.error(f"Error executing model: {e}")
