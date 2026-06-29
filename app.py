@@ -97,7 +97,8 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
     [List specific violations, over-claimed amounts, or missing details clearly.]
     """
     
-    model = genai.GenerativeModel('models/gemini-1.5-flash')
+    # Fixed model name format to prevent 404 version issues
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     with st.spinner("Analyzing text, fetching details and auditing conveyance..."):
         try:
