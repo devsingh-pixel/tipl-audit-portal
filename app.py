@@ -16,10 +16,14 @@ gender = st.sidebar.selectbox("Gender of Employee:", ["Male", "Female"])
 uploaded_file = st.file_uploader("Upload Tour Bill / Expense Text / PDF", type=["pdf", "txt"])
 
 if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
-    # Proper SDK Initialization
+    # Explicitly bypass local/beta network overrides
+    import os
+    os.environ["STREAMLIT_SERVER_COOKIE_SECRET"] = "secure"
+    
+    # Standard Configuration
     genai.configure(api_key=api_key)
     
-    # Extract text from PDF
+    # Extract text from file
     pdf_text = ""
     if uploaded_file.type == "application/pdf":
         reader = PdfReader(uploaded_file)
@@ -39,7 +43,7 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
     - Employee Gender: {gender}
     
     TASK 1: AUTOMATIC CONTEXT EXTRACTION FROM TEXT
-    1. Identify the Employee's Designation from the text.
+    1. Identify the Employee's Designation from the text (e.g., Sr. Engineer).
     2. Identify the visited places/cities from the text and automatically categorize the City Category for each day/expense based on these rules:
        - 'Metro (Mumbai)' if Mumbai is mentioned.
        - 'Metros' if Delhi, Kolkata, Chennai, NCR, Bangalore, Hyderabad are mentioned.
@@ -75,7 +79,7 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
     Output Format (Strictly structured):
     ### 📊 Fully-Automatic Audit Report
     - **Detected Designation:** [Designation name]
-    - **Detected Places & City Categories:** [e.g., Anpra (Other Cities), Mumbai (Metro)]
+    - **Detected Places & City Categories:** [e.g., Anpra (Other Cities)]
     
     #### 💰 Financial Summary
     - **Total Claimed Amount:** Rs. [Total]
@@ -88,19 +92,12 @@ if st.button("Run Fully-Automatic Audit") and uploaded_file and api_key:
     [List specific violations, over-claimed amounts, or missing details clearly.]
     """
     
-    with st.spinner("Analyzing text, fetching details and auditing conveyance..."):
+    with St.spinner("Analyzing text, fetching details and auditing conveyance..."):
         try:
-            # Using the absolute verified string identifier format for modern genai python packages
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            # Forcing standard generation call using direct core model string
+            model = genai.GenerativeModel(model_name='gemini-1.5-flash')
             response = model.generate_content(prompt)
-            st.subheader("📋 Final Audit Results")
-            st.write(response.text)
+            St.subheader("📋 Final Audit Results")
+            St.write(response.text)
         except Exception as e:
-            # Ultimate fail-safe if the system strictly expects text-generation model labels
-            try:
-                model_alt = genai.GenerativeModel('gemini-pro')
-                response_alt = model_alt.generate_content(prompt)
-                st.subheader("📋 Final Audit Results")
-                st.write(response_alt.text)
-            except Exception as e2:
-                st.error(f"Initialization Error: Please verify your API Key or library versions. Info: {e2}")
+            St.error(f"Error executing model: {e}")
