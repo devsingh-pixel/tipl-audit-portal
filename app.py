@@ -1,146 +1,411 @@
-import streamlit as st
-import re
-from pypdf import PdfReader
+def extract_text(uploaded_file):
+    text = ""
 
-# Page Configuration
-st.set_page_config(page_title="TIPL TE Rules Audit Portal", layout="wide")
+    try:
+        uploaded_file.seek(0)
 
-st.title("🛄 TIPL Travel Expense Summary Audit Portal (Strict Validator)")
-st.write("Upload any tour expense log. This engine strictly audits ONLY the fields found in the text and prevents any ghost amounts.")
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
 
-# Sidebar Controls
-st.sidebar.header("📋 Setup & Inputs")
-gender = st.sidebar.selectbox("Gender of Employee:", ["Male", "Female"])
+        if len(text.strip()) > 100:
+            return text
 
-# 📂 File Uploader
-uploaded_file = st.file_uploader("Upload Tour Bill / Expense Text / PDF", type=["pdf", "txt"])
+    except:
+        pass
 
-if st.button("Run Fully-Automatic Audit"):
-    file_text = ""
-    
-    # 1. Read file context dynamically
+    uploaded_file.seek(0)
+
+    try:
+        doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+
+        for page in doc:
+            text += page.get_text()
+
+        if len(text.strip()) > 100:
+            return text
+
+    except:
+        pass
+
+    uploaded_file.seek(0)
+
+    try:
+        doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+
+        for page in doc:
+
+            pix = page.get_pixmap(dpi=300)
+
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+            text += pytesseract.image_to_string(img)
+
+    except:
+        pass
+
+    return text
     if uploaded_file:
-        if uploaded_file.type == "application/pdf":
-            try:
-                reader = PdfReader(uploaded_file)
-                for page in reader.pages:
-                    text = page.extract_text()
-                    if text: file_text += text
-            except Exception as e:
-                st.error(f"Error reading PDF: {e}")
+    file_text = extract_text(uploaded_file)
+    Boarding(Food)
+Taxi
+Auto
+import re
+
+def smart_extract_amount(text, keywords):
+    """
+    Extracts all amounts associated with any keyword.
+    Returns total amount.
+    """
+
+    total = 0.0
+
+    patterns = [
+        r"{}\s*[:\-]?\s*Rs\.?\s*([\d,]+\.\d{{2}})",
+        r"{}\s*[:\-]?\s*([\d,]+\.\d{{2}})",
+        r"Rs\.?\s*([\d,]+\.\d{{2}})\s*{}",
+        r"{}\D{{0,20}}([\d,]+\.\d{{2}})"
+    ]
+
+    for key in keywords:
+
+        for pattern in patterns:
+
+            regex = pattern.format(re.escape(key))
+
+            matches = re.findall(regex, text, re.IGNORECASE)
+
+            for m in matches:
+
+                try:
+
+                    total += float(m.replace(",", ""))
+
+                except:
+
+                    pass
+
+    return round(total,2)
+    board_claim = fetch_strict_val(...)
+    board_claim = smart_extract_amount(file_text,
+[
+"Boarding",
+"Food",
+"Meal",
+"Meals",
+"Breakfast",
+"Lunch",
+"Dinner",
+"Food Charges",
+"Refreshment"
+])
+
+lodg_claim = smart_extract_amount(file_text,
+[
+"Lodging",
+"Hotel",
+"Hotel Charges",
+"Accommodation",
+"Stay",
+"Room Rent"
+])
+
+conv_claim = smart_extract_amount(file_text,
+[
+"Taxi",
+"Cab",
+"Uber",
+"OLA",
+"Rapido",
+"Auto",
+"Rickshaw",
+"Metro",
+"Bus",
+"Parking",
+"Toll",
+"Fuel",
+"Conveyance",
+"Local Travel"
+])
+
+tkt_claim = smart_extract_amount(file_text,
+[
+"Flight",
+"Air Ticket",
+"Train",
+"Rail",
+"Bus Ticket",
+"Travel Ticket",
+"Ticket",
+"Airfare"
+])
+def detect_documents(file_text):
+
+    text = file_text.lower()
+
+    documents = {
+        "tour_summary": False,
+        "hotel_bill": False,
+        "food_bill": False,
+        "taxi_bill": False,
+        "flight_ticket": False,
+        "train_ticket": False,
+        "bus_ticket": False,
+        "gst_invoice": False,
+        "fuel_bill": False
+    }
+
+    # Tour Summary
+    if any(x in text for x in [
+        "tour no",
+        "tour summary",
+        "employee name",
+        "designation",
+        "start date",
+        "end date"
+    ]):
+        documents["tour_summary"] = True
+
+    # Hotel
+    if any(x in text for x in [
+        "hotel",
+        "accommodation",
+        "room",
+        "check in",
+        "check out",
+        "room rent"
+    ]):
+        documents["hotel_bill"] = True
+
+    # Food
+    if any(x in text for x in [
+        "food",
+        "meal",
+        "restaurant",
+        "breakfast",
+        "lunch",
+        "dinner",
+        "refreshment"
+    ]):
+        documents["food_bill"] = True
+
+    # Taxi
+    if any(x in text for x in [
+        "taxi",
+        "cab",
+        "uber",
+        "ola",
+        "rapido",
+        "auto",
+        "rickshaw"
+    ]):
+        documents["taxi_bill"] = True
+
+    # Flight
+    if any(x in text for x in [
+        "flight",
+        "boarding pass",
+        "pnr",
+        "air ticket",
+        "airfare"
+    ]):
+        documents["flight_ticket"] = True
+
+    # Train
+    if any(x in text for x in [
+        "indian railways",
+        "railway",
+        "train",
+        "irctc",
+        "pnr"
+    ]):
+        documents["train_ticket"] = True
+
+    # Bus
+    if any(x in text for x in [
+        "bus",
+        "redbus",
+        "volvo"
+    ]):
+        documents["bus_ticket"] = True
+
+    # GST
+    if any(x in text for x in [
+        "gstin",
+        "gst no",
+        "tax invoice"
+    ]):
+        documents["gst_invoice"] = True
+
+    # Fuel
+    if any(x in text for x in [
+        "petrol",
+        "diesel",
+        "fuel"
+    ]):
+        documents["fuel_bill"] = True
+
+    return documents
+    st.subheader("📂 Documents Detected")
+
+for doc, status in documents.items():
+
+    if status:
+        st.success(f"✅ {doc.replace('_',' ').title()}")
+
+    else:
+        st.warning(f"❌ {doc.replace('_',' ').title()} Not Found")
+        from datetime import datetime
+import re
+
+def audit_engine(file_text, gender="Male"):
+
+    audit = {}
+
+    text = file_text.lower()
+
+    # -----------------------
+    # Employee
+    # -----------------------
+
+    emp = re.search(r"employee\s*name[:\-]?\s*(.*)", file_text, re.IGNORECASE)
+
+    audit["employee"] = emp.group(1).strip() if emp else "Unknown"
+
+    des = re.search(r"designation[:\-]?\s*(.*)", file_text, re.IGNORECASE)
+
+    audit["designation"] = des.group(1).strip() if des else "Unknown"
+
+    # -----------------------
+    # Dates
+    # -----------------------
+
+    dates = re.findall(r"\d{2}/\d{2}/\d{4}", file_text)
+
+    if len(dates)>=2:
+
+        start = datetime.strptime(dates[0],"%d/%m/%Y")
+
+        end = datetime.strptime(dates[1],"%d/%m/%Y")
+
+        audit["days"]=(end-start).days+1
+
+        audit["nights"]=(end-start).days
+
+    else:
+
+        audit["days"]=0
+
+        audit["nights"]=0
+
+    # -----------------------
+    # Time
+    # -----------------------
+
+    times=re.findall(r"\d{2}:\d{2}",file_text)
+
+    audit["start_time"]=times[0] if len(times)>0 else "NA"
+
+    audit["end_time"]=times[1] if len(times)>1 else "NA"
+
+    # -----------------------
+    # Boarding
+    # -----------------------
+
+    if audit["start_time"]!="NA":
+
+        hr=int(audit["start_time"][:2])
+
+        if hr<=10:
+
+            audit["boarding_start"]="100 %"
+
+        elif hr<=13:
+
+            audit["boarding_start"]="70 %"
+
         else:
-            file_text = uploaded_file.read().decode("utf-8")
-    else:
-        # Exact shared real text mapping (NO TICKETS)
-        file_text = """
-        Tour No. TR/14026/26-27 Employee Name: Durgesh Mani Mishra Designation: Sr. Engineer
-        Start Date: 04/05/2026 Time: 09:30 
-        End Date: 07/05/2026 Time: 20:00 
-        Total Days: 4 Places: Anpra, Rihand, Singrauli
-        Boarding(Food): Rs. 1940.00
-        Lodging(Hotel): Rs. 2550.00
-        Conveyance: Auto Rs. 410.00 | Taxi Rs. 1000.00
-        Total Claimed Amount: Rs. 5900.00
-        """
-        st.info("ℹ️ No file uploaded. Processing template structure (No Tickets):")
 
-    # 2. Ultra-Strict Extract Function
-    def fetch_strict_val(pattern, src):
-        res = re.search(pattern, src, re.IGNORECASE)
-        if res:
-            try:
-                # Clean strings to avoid wrong calculations
-                val_str = res.group(1).replace(",", "").strip()
-                return float(val_str)
-            except:
-                return 0.0
-        return 0.0
+            audit["boarding_start"]="40 %"
 
-    board_claim = fetch_strict_val(r"Boarding\(Food\)[^\d]*([\d.,]+)", file_text)
-    lodg_claim = fetch_strict_val(r"Lodging\(Hotel\)[^\d]*([\d.,]+)", file_text)
-    
-    # Conveyance Calculation
-    taxi = fetch_strict_val(r"Taxi[^\d]*([\d.,]+)", file_text)
-    auto = fetch_strict_val(r"Auto[^\d]*([\d.,]+)", file_text)
-    conv_claim = taxi + auto if (taxi + auto) > 0 else fetch_strict_val(r"Conveyance[^\d]*([\d.,]+)", file_text)
-    
-    # 🎫 STRICT SINGLE-WORD MATCH: No more random string fetching for tickets
-    tkt_claim = 0.0
-    # Checks if any exact ticket headers are present in the text
-    if "travel ticket" in file_text.lower() or "ticket amount" in file_text.lower() or "ticket:" in file_text.lower():
-        tkt_match = re.search(r"(?:Travel\s)?Ticket(?:[^0-9\n]*\s)([\d.,]+)", file_text, re.IGNORECASE)
-        if tkt_match:
-            try:
-                tkt_claim = float(tkt_match.group(1).replace(",", "").strip())
-            except:
-                tkt_claim = 0.0
+    if audit["end_time"]!="NA":
 
-    # 3. Pure 24-Hour Extraction Logic
-    times_found = re.findall(r"(\d{2}:\d{2})", file_text)
-    start_time_str = times_found[0] if len(times_found) > 0 else "09:30"
-    end_time_str = times_found[1] if len(times_found) > 1 else "20:00"
-    
-    start_hour = int(start_time_str.split(":")[0])
-    end_hour = int(end_time_str.split(":")[0])
-    
-    is_engineer = "engineer" in file_text.lower()
-    b_rate_per_day = 485.0 if is_engineer else 390.0
-    l_rate_per_day = 850.0 if is_engineer else 700.0
-    if gender == "Female": l_rate_per_day += 200.0
+        hr=int(audit["end_time"][:2])
 
-    # ⏱️ TIPL Strict Timing Rules (09:30 to 20:00 = 100% Full Boarding)
-    middle_boarding = 2.0 * b_rate_per_day
-    
-    if start_hour <= 10:
-        day1_pct = 1.00 
-    elif start_hour <= 13:
-        day1_pct = 0.70 
-    else:
-        day1_pct = 0.40 
-    day1_boarding = b_rate_per_day * day1_pct
-    
-    if end_hour >= 19:
-        day4_pct = 1.00
-    elif end_hour >= 12:
-        day4_pct = 0.70 
-    else:
-        day4_pct = 0.40
-    day4_boarding = b_rate_per_day * day4_pct
+        if hr>=19:
 
-    b_allow = day1_boarding + middle_boarding + day4_boarding
-    effective_b_days = day1_pct + 2.0 + day4_pct
-    
-    l_allow = 3.0 * l_rate_per_day
-    c_allow = conv_claim 
-    t_allow = tkt_claim
-    
-    # Grand Totals
-    grand_calculated_claim = board_claim + lodg_claim + conv_claim + tkt_claim
-    grand_allow = b_allow + l_allow + c_allow + t_allow
-    
-    # Prevent round-off errors
-    over_claim = grand_calculated_claim - grand_allow
-    if over_claim < 0 or abs(grand_calculated_claim - grand_allow) < 1.0: 
-        over_claim = 0.0
-        grand_allow = grand_calculated_claim
+            audit["boarding_end"]="100 %"
 
-    # 4. Table UI Summary Output
-    st.markdown("### 📊 Executive Audit Summary")
-    st.markdown(f"**Timings Parsed:** Departure: `{start_time_str}` | Return: `{end_time_str}`")
+        elif hr>=12:
 
-    table_content = f"""
-| Expense Type | Rule/Limit Per Day | Total Days/Qty | Total Claimed | Total Allowed | Auditor Remarks/Justification |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Boarding (Food)** | Rs. {b_rate_per_day}/day | {effective_b_days:.1f} Days | Rs. {board_claim:.2f} | Rs. {b_allow:.2f} | 24-hour match: Start `{start_time_str}` and End `{end_time_str}` are 100% full approved. |
-| **Lodging (Hotel)** | Rs. {l_rate_per_day}/day | 3 Nights | Rs. {lodg_claim:.2f} | Rs. {l_allow:.2f} | Rates map completely within policy bounds. |
-| **Conveyance** | As per Mode/KM | Local Trips | Rs. {conv_claim:.2f} | Rs. {c_allow:.2f} | Conveyance verified from document text entries. |
-| **Travel Tickets** | Actuals | Tickets Logged | Rs. {tkt_claim:.2f} | Rs. {t_allow:.2f} | {'No travel tickets detected in the uploaded file.' if tkt_claim == 0.0 else 'Tickets processed directly from entries.'} |
-| **TOTAL** | - | - | **Rs. {grand_calculated_claim:.2f}** | **Rs. {grand_allow:.2f}** | **Net Over-claimed Amount: Rs. {over_claim:.2f}** |
-"""
-    st.markdown(table_content)
+            audit["boarding_end"]="70 %"
 
-    # Compliance log
-    if over_claim > 0:
-        st.error(f"❌ **Policy Violation:** Mismatch detected. Total excess amount: Rs. {over_claim:.2f}")
-    else:
-        st.success("✅ **Clean Audit!** Sabhi claims [TIPL TE Rules](http://live.tipl.com/pdf/TIPL_TE%20Rules_w.e.f.%201%20April.2025.pdf) ke criteria aur timings se 100% match ho gaye hain.")
+        else:
+
+            audit["boarding_end"]="40 %"
+
+    # -----------------------
+    # Risks
+    # -----------------------
+
+    risks=[]
+
+    if "gstin" not in text:
+
+        risks.append("GST Number Missing")
+
+    if "hotel" not in text:
+
+        risks.append("Hotel Bill Missing")
+
+    if "ticket" not in text and "flight" not in text and "train" not in text:
+
+        risks.append("Travel Ticket Missing")
+
+    if "taxi" not in text and "cab" not in text and "auto" not in text:
+
+        risks.append("Conveyance Proof Missing")
+
+    audit["risks"]=risks
+
+    audit["risk_score"]=len(risks)*25
+
+    if audit["risk_score"]>100:
+
+        audit["risk_score"]=100
+
+    return audit
+audit = audit_engine(file_text, gender)
+st.subheader("🤖 AI Audit")
+
+st.write("Employee :",audit["employee"])
+
+st.write("Designation :",audit["designation"])
+
+st.write("Tour Days :",audit["days"])
+
+st.write("Tour Nights :",audit["nights"])
+
+st.write("Departure :",audit["start_time"])
+
+st.write("Return :",audit["end_time"])
+
+st.write("Risk Score :",audit["risk_score"],"%")
+
+if audit["risk_score"]<25:
+
+    st.success("🟢 LOW RISK")
+
+elif audit["risk_score"]<60:
+
+    st.warning("🟡 MEDIUM RISK")
+
+else:
+
+    st.error("🔴 HIGH RISK")
+
+for r in audit["risks"]:
+
+    st.write("❌",r)
