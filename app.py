@@ -4,12 +4,12 @@ import pdfplumber
 import re
 from datetime import datetime
 
-# 1. Page Configuration (Strictly at the very top)
+# 1. Page Configuration (Strictly at the absolute top of the file)
 st.set_page_config(page_title="TIPL TE Auto-Audit Engine", layout="wide")
 st.title("🚀 TIPL TE Fully Automated Audit Portal")
 
 # =====================================================================
-# COMPLETE TIPL POLICY DATABASE (Page 1 & 2 of PDF)
+# COMPLETE TIPL POLICY DATABASE (As per PDF Pages 1, 2 & 3)
 # =====================================================================
 DESIGNATION_LIMITS = {
     "WORKMEN": {"Metros": {"lodging": 550, "boarding": 330}, "State Capitals": {"lodging": 500, "boarding": 305}, "Other": {"lodging": 450, "boarding": 305}},
@@ -40,7 +40,7 @@ def parse_pdf_locally(file):
             if content:
                 raw_text += content + "\n"
                 
-    # Default parameters context fallback
+    # Intelligent Defaults (Will be overwritten dynamically if matched)
     start_date, start_time = "2026-05-04", "09:30:00"
     end_date, end_time = "2026-05-07", "20:00:00"
     department = "General"
@@ -51,11 +51,11 @@ def parse_pdf_locally(file):
     for line in lines:
         l_lower = line.lower()
         
-        # 1. Automatic Department Stream Mapping (Service-DSIC Verification)
+        # 1. Automatic Department Mapping
         if "service-dsic" in l_lower or "service dsic" in l_lower or "dsic" in l_lower:
             department = "Service-DSIC"
             
-        # 2. Automatic City Tier Threshold Captures
+        # 2. Automatic City Tier Lookup 
         if any(m in l_lower for m in ["mumbai", "kolkata", "chennai", "delhi", "ncr", "bangalore", "hyderabad"]):
             location_type = "Metros"
         elif any(c in l_lower for c in ["jaipur", "lucknow", "patna", "bhopal", "ahmedabad", "capital"]):
@@ -81,7 +81,7 @@ def parse_pdf_locally(file):
     except:
         total_tour_days = 4 
 
-    # Isolate transaction arrays from totals block to avoid duplication jhanjhat
+    # Cleaned slicing block to separate items from grand totals
     extracted_items = []
     if "expenses detail" in raw_text.lower():
         expenses_part = raw_text.lower().split("expenses detail")[1]
@@ -102,4 +102,12 @@ def parse_pdf_locally(file):
             
         expense_type = None
         if "boarding" in line_clean.lower():
-            expense_type =
+            expense_type = "Boarding(Food)"
+        elif "lodging" in line_clean.lower():
+            expense_type = "Lodging(Hotel)"
+        elif "conveyance" in line_clean.lower() or "taxi" in line_clean.lower() or "auto" in line_clean.lower():
+            expense_type = "Conveyance(Local)"
+
+        if expense_type:
+            amounts = re.findall(r'\b\d+(?:\.\d+)?\b', line_clean)
+            valid_amounts =
