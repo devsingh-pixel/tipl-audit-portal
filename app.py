@@ -63,7 +63,6 @@ def process_and_audit_expenses(text, designation, days, start_time):
     data = []
     cutoff_time = datetime.strptime("10:00 AM", "%I:%M %p").time()
     
-    # Smart Matching for Designation Substrings
     desig_upper = designation.upper()
     matched_grade = "DEFAULT"
     for grade in POLICY_LIMITS.keys():
@@ -73,7 +72,6 @@ def process_and_audit_expenses(text, designation, days, start_time):
             
     limits = POLICY_LIMITS[matched_grade]
     
-    # All 5 Required Expense Categories target config mapping
     target_mappings = {
         "boarding": "Boarding",
         "lodging": "Lodging",
@@ -82,24 +80,21 @@ def process_and_audit_expenses(text, designation, days, start_time):
         "lodging relative": "Lodging relative"
     }
     
-    # Scanning document line-by-line to prevent structural pattern failure
     for line in text.split('\n'):
         line_clean = line.strip()
         if not line_clean:
             continue
             
         for key, display_name in target_mappings.items():
-            # Standard boundary regex matching for single or multiple phrase keywords
             if re.search(r'\b' + re.escape(key) + r'\b', line_clean.lower()):
-                # Extracting numerical parts inside the localized raw row string context
                 amounts = re.findall(r'\d+(?:\.\d+)?', line_clean)
                 if amounts:
-                    original_amount = float(amounts[-1]) # Selecting terminal numeric sequence as total cost
+                    original_amount = float(amounts[-1])
                     approved_amount = original_amount
                     remarks = "Fully Approved as per TIPL policy"
                     status = "Passed"
                     
-                    # 1. Boarding Auditing Rule Execution Block
+                    # 1. Boarding Auditing Rule
                     if key == "boarding":
                         max_boarding_allowed = limits["boarding"] * days
                         if start_time and start_time > cutoff_time:
@@ -112,7 +107,7 @@ def process_and_audit_expenses(text, designation, days, start_time):
                             remarks += f" Over-budget! Capped at max daily limit of ₹{max_boarding_allowed}."
                             status = "Adjusted"
                             
-                    # 2. Lodging Auditing Rule Execution Block
+                    # 2. Lodging Auditing Rule
                     elif key == "lodging":
                         max_lodging_allowed = limits["lodging"] * days
                         if original_amount > max_lodging_allowed:
@@ -120,7 +115,7 @@ def process_and_audit_expenses(text, designation, days, start_time):
                             remarks = f"Exceeded ceiling barrier! Capped at max allowance of ₹{max_lodging_allowed}."
                             status = "Adjusted"
                             
-                    # 3. Lodging Relative Auditing Rule Execution Block
+                    # 3. Lodging Relative Auditing Rule
                     elif key == "lodging relative":
                         max_rel_allowed = limits["lodging_relative"] * days
                         if original_amount > max_rel_allowed:
@@ -128,7 +123,7 @@ def process_and_audit_expenses(text, designation, days, start_time):
                             remarks = f"Relative accommodation capped at flat policy boundary of ₹{max_rel_allowed}."
                             status = "Adjusted"
                             
-                    # 4. Travel Ticket Auditing Rule Execution Block
+                    # 4. Travel Ticket Auditing Rule
                     elif key == "travel ticket":
                         max_ticket_allowed = limits["travel_ticket"]
                         if original_amount > max_ticket_allowed:
@@ -136,7 +131,7 @@ def process_and_audit_expenses(text, designation, days, start_time):
                             remarks = f"Ticket ceiling breached! Capped at maximum allocation threshold of ₹{max_ticket_allowed}."
                             status = "Adjusted"
                             
-                    # 5. Conveyance Auditing Rule Execution Block
+                    # 5. Conveyance Auditing Rule
                     elif key == "conveyance":
                         remarks = "Conveyance passed systemic validation (Receipt matching mandatory)."
                     
@@ -147,11 +142,52 @@ def process_and_audit_expenses(text, designation, days, start_time):
                         "Status": status,
                         "Audit Remarks": remarks
                     })
-                    break # Avoid running secondary pattern loops on the same line buffer
+                    break 
                     
     return data, matched_grade
 
-# ---------- STREAMLIT UI APP ----------
+# ---------- STREAMLIT UI APP (FIXED INDENTATION) ----------
 file = st.file_uploader("Upload TE PDF File", type=["pdf"])
 
 if file:
+    text = extract_text(file)
+    
+    if text:
+        designation = find_designation(text)
+        days = find_days(text)
+        start_time = find_start_time(text)
+        
+        st.success("🎉 PDF Successfully Uploaded & Parsed!")
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Extracted Designation", designation)
+        col2.metric("Calculated Tour Days", days)
+        col3.metric("Tour Start Time", start_time.strftime("%I:%M %p") if start_time else "Not Detected")
+        
+        expenses, applied_grade = process_and_audit_expenses(text, designation, days, start_time)
+        
+        if expenses:
+            df = pd.DataFrame(expenses)
+            st.subheader(f"📊 TIPL Policy Compliance Summary (Applied Grid: {applied_grade})")
+            
+            st.table(df[["Expense Head", "Claimed Amount", "Approved Amount", "Status", "Audit Remarks"]])
+            
+            total_claimed = df["Claimed Amount"].sum()
+            total_approved = df["Approved Amount"].sum()
+            
+            col_tot1, col_tot2 = st.columns(2)
+            col_tot1.info(f"Total Claimed: ₹ {total_claimed:.2f}")
+            col_tot2.success(f"Total Approved: ₹ {total_approved:.2f}")
+            
+            st.markdown("---")
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Official Audit Report (CSV)",
+                data=csv,
+                file_name=f"TIPL_Audit_Report_{designation.replace(' ', '_')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning("⚠️ No valid matches found for Boarding, Lodging, Conveyance, Travel ticket, or Lodging relative.")
+else:
+    st.info("ℹ️ Please upload your official T&E file to initiate live policy mapping.")
