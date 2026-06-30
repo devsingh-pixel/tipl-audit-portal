@@ -1,24 +1,51 @@
 import streamlit as st
+import pandas as pd
+import pdfplumber
 
-st.set_page_config(page_title="TIPL AI Audit Portal")
+st.set_page_config(
+    page_title="TIPL Audit Portal",
+    layout="wide"
+)
 
-st.title("TIPL AI Travel Expense Auditor")
-st.write("App Under Development")
-import streamlit as st
-import google.generativeai as genai
+st.title("TIPL Audit Portal")
 
-st.set_page_config(page_title="TIPL AI Audit Portal", layout="wide")
+st.write("Upload PDF file for audit review")
 
-# Read API from Streamlit Secrets
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+uploaded_file = st.file_uploader(
+    "Upload PDF",
+    type=["pdf"]
+)
 
-# Load Gemini Model
-model = genai.GenerativeModel("gemini-2.5-flash")
+if uploaded_file:
 
-st.title("🤖 TIPL AI Travel Expense Auditor")
+    st.success("PDF uploaded successfully")
 
-if st.button("Test Gemini API"):
+    text = ""
 
-    response = model.generate_content("Reply with only: Gemini Connected Successfully")
+    with pdfplumber.open(uploaded_file) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text
 
-    st.success(response.text)
+    st.subheader("Extracted Data")
+
+    st.text_area(
+        "PDF Content",
+        text,
+        height=400
+    )
+
+    st.subheader("Audit Summary")
+
+    data = {
+        "Status": ["Document Read"],
+        "Pages Extracted": [len(text)]
+    }
+
+    df = pd.DataFrame(data)
+
+    st.table(df)
+
+else:
+    st.info("Please upload PDF file to start audit")
