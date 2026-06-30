@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import re
-from datetime import datetime
 
 st.set_page_config(page_title="TIPL TE Auto-Audit Engine", layout="wide")
 st.title("🚀 TIPL TE Fully Automated Audit Portal")
@@ -30,27 +29,20 @@ def parse_pdf_locally(file):
     
     total_tour_days = 5
     extracted_items = []
-    
-    if "expenses detail" in raw_text.lower():
-        parts = raw_text.lower().split("expenses detail")
-        expenses_part = parts[1] if len(parts) > 1 else raw_text.lower()
-        if "advance received" in expenses_part:
-            expenses_part = expenses_part.split("advance received")[0]
-        if "expense summary" in expenses_part:
-            expenses_part = expenses_part.split("expense summary")[0]
-    else:
-        expenses_part = raw_text.lower()
 
-    current_date = start_date
-    for line in expenses_part.split("\n"):
+    for line in raw_text.split("\n"):
         line_clean = line.strip().lower()
         
-        if not line_clean or any(x in line_clean for x in ["account code", "applied amount", "grand total", "total passed", "passed amount", "jv detail"]):
+        # CRITICAL REJECTION: Summary wale pure section ko aur headers ko bypass karna
+        if not line_clean or any(x in line_clean for x in ["account code", "applied amount", "grand total", "total passed", "passed amount", "jv detail", "expense summary"]):
             continue
             
+        # PURE IMMUNITY: Sirf aur sirf wahi line pick hogi jisme real travel date framework maujood ho
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line_clean)
-        if date_match:
-            current_date = date_match.group(1)
+        if not date_match:
+            continue
+            
+        current_date = date_match.group(1)
             
         expense_type = None
         if "boarding" in line_clean:
@@ -66,6 +58,7 @@ def parse_pdf_locally(file):
             
             if valid_tokens:
                 val = float(valid_tokens[-1])
+                # Filter out Serial numbers or distances that get mixed up
                 if val in [10.0, 15.0, 60.0, 1.0, 2.0, 3.0, 4.0, 5.0]:
                     continue
                     
@@ -102,7 +95,6 @@ def process_local_audit(meta, ledger):
                 total_approved += min(amt, general_rules["boarding"])
                 remarks = f"Standard limit ₹{general_rules['boarding']}/day checked."
             elif "lodging" in exp_type.lower():
-                # CRITICAL FIX: 'base' is strictly initialized before use to prevent NameError
                 base = dsic_rules["lodging"] if meta["department"] == "Service-DSIC" else general_rules["lodging"]
                 total_approved += min(amt, base)
                 remarks = f"Capped at ₹{base}/day as per DSIC 0-5 days matrix."
