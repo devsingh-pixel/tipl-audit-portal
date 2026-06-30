@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 st.set_page_config(page_title="TIPL TE Audit Portal", layout="wide")
-st.title("📋 TIPL TE Audit Portal (Anti-Duplication Engine)")
+st.title("📋 TIPL TE Audit Portal (Final Clean Auditor)")
 
 # =====================================================================
 # TIPL COMPANY POLICY CONFIGURATION MATRIX (1 April 2025 Rules)
@@ -61,9 +61,9 @@ def find_start_time(text):
             pass
     return None
 
-# ---------- METICULOUS EXPENSES DETAIL AUDITOR ----------
+# ---------- SMART DATE-WISE GROUPED AUDITOR ----------
 def audit_expenses_detail(text, designation, days, start_time):
-    # Strict isolation: Filter out everything before "Expenses Detail" to kill JV tables completely
+    # Strict isolation: Focus only on content after "Expenses Detail"
     if "expenses detail" in text.lower():
         target_section = text.lower().split("expenses detail")[1]
     else:
@@ -88,20 +88,24 @@ def audit_expenses_detail(text, designation, days, start_time):
     }
 
     raw_lines = target_section.split("\n")
-    audit_data = []
     
-    # Tracking set to eliminate duplicate entries on the same date for the same category
-    seen_records = set()
+    # Dictionary to aggregate amounts: key as (Date, Expense Type) -> value as total amount
+    aggregated_claims = {}
+    current_date = "In Travelling"
 
-    for i, line in enumerate(raw_lines):
+    for line in raw_lines:
         line_clean = line.strip()
         
-        # Hard Skip for summary rows containing words like 'total', 'grand total', 'sub total'
+        # Hard skip for summary or total rows
         if any(term in line_clean for term in ["total", "grand", "sub", "jv"]):
             continue
 
+        # Extract Date if present in the line
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line_clean)
+        if date_match:
+            current_date = date_match.group(1)
         
+        # Check for category match
         detected_category = None
         for cat_key in categories.keys():
             if cat_key in line_clean:
@@ -111,72 +115,69 @@ def audit_expenses_detail(text, designation, days, start_time):
         if detected_category:
             amounts = re.findall(r'\d+(?:\.\d+)?', line_clean)
             if amounts:
-                # Filter out pure year values like 2026 or small garbage numbers
+                # Exclude strings that resemble years or tiny noise figures
                 valid_amounts = [float(amt) for amt in amounts if float(amt) > 50 and not re.match(r'^20\d{2}$', amt)]
                 if not valid_amounts:
                     continue
-                original_amount = valid_amounts[-1] 
+                original_amount = valid_amounts[-1]
                 
-                row_date = date_match.group(1) if date_match else "In Travelling"
+                # Combine matching date + category to prevent repetition rows
+                key = (current_date, detected_category)
+                aggregated_claims[key] = aggregated_claims.get(key, 0.0) + original_amount
 
-                # If current line misses date context, carry forward from upper row index trace
-                if row_date == "In Travelling" and i > 0:
-                    prev_date_match = re.search(r'(\d{4}-\d{2}-\d{2})', raw_lines[i-1])
-                    if prev_date_match:
-                        row_date = prev_date_match.group(1)
+    # Process audited rules over the clean aggregated dataset
+    audit_data = []
+    is_first_boarding_processed = False
 
-                # DEDUPLICATION CHECK: If this Date + Category combo is already captured, SKIP IT!
-                unique_key = (row_date, detected_category)
-                if unique_key in seen_records:
-                    continue
-                
-                # Register the unique signature trace
-                seen_records.add(unique_key)
+    for (row_date, expense_head), total_claimed_amt in aggregated_claims.items():
+        approved_amount = total_claimed_amt
+        status = "Passed"
+        remarks = "Approved as per policy"
 
-                approved_amount = original_amount
-                status = "Passed"
-                remarks = "Approved as per policy"
+        # --- 1. Boarding Automation Check ---
+        if expense_head == "Boarding":
+            # Apply 30% cut if it's the start/first record of boarding and time > 10 AM
+            if start_time and start_time > cutoff_time and not is_first_boarding_processed:
+                approved_amount = total_claimed_amt * 0.70
+                remarks = f"30% Late Start Cut applied (Started at {start_time.strftime('%I:%M %p')})"
+                status = "Adjusted"
+                is_first_boarding_processed = True
+            
+            if approved_amount > limits["boarding"]:
+                approved_amount = limits["boarding"]
+                remarks = f"Exceeded daily allowance limit of ₹{limits['boarding']}."
+                status = "Adjusted"
 
-                # --- 1. Date-Wise Boarding Rules ---
-                if detected_category == "Boarding":
-                    if start_time and start_time > cutoff_time and ("travelling" in line_clean or len(audit_data) == 0):
-                        approved_amount = original_amount * 0.70
-                        remarks = f"30% Late Start Cut applied (Tour started at {start_time.strftime('%I:%M %p')})"
-                        status = "Adjusted"
-                    
-                    if approved_amount > limits["boarding"]:
-                        approved_amount = limits["boarding"]
-                        remarks = f"Exceeded daily allowance ceiling of ₹{limits['boarding']}."
-                        status = "Adjusted"
+        # --- 2. Lodging Automation Check ---
+        elif expense_head == "Lodging":
+            if total_claimed_amt > limits["lodging"]:
+                approved_amount = limits["lodging"]
+                remarks = f"Exceeded single day limit of ₹{limits['lodging']}."
+                status = "Adjusted"
 
-                # --- 2. Lodging Cap Rules ---
-                elif detected_category == "Lodging":
-                    if original_amount > limits["lodging"]:
-                        approved_amount = limits["lodging"]
-                        remarks = f"Exceeded single day limit of ₹{limits['lodging']}."
-                        status = "Adjusted"
+        # --- 3. Other Dynamic Modules ---
+        elif expense_head == "Lodging relative" and total_claimed_amt > limits["lodging_relative"]:
+            approved_amount = limits["lodging_relative"]
+            remarks = "Capped at relative stay limit."
+            status = "Adjusted"
+        elif expense_head == "Travel ticket" and total_claimed_amt > limits["travel_ticket"]:
+            approved_amount = limits["travel_ticket"]
+            remarks = "Ticket price exceeded policy ceiling thresholds."
+            status = "Adjusted"
+        elif expense_head == "Conveyance":
+            remarks = "Conveyance approved (Receipt matching mandatory)."
 
-                # --- 3. Other Core Category Audits ---
-                elif detected_category == "Lodging relative" and original_amount > limits["lodging_relative"]:
-                    approved_amount = limits["lodging_relative"]
-                    remarks = "Capped at relative stay daily limit."
-                    status = "Adjusted"
-                elif detected_category == "Travel ticket" and original_amount > limits["travel_ticket"]:
-                    approved_amount = limits["travel_ticket"]
-                    remarks = "Ticket cost exceeded policy limits."
-                    status = "Adjusted"
-                elif detected_category == "Conveyance":
-                    remarks = "Conveyance approved (Receipt verification required)."
+        audit_data.append({
+            "Date": row_date,
+            "Expense Type": expense_head,
+            "Claimed Amount": total_claimed_amt,
+            "Approved Amount": approved_amount,
+            "Status": status,
+            "Audit Remarks": remarks
+        })
 
-                audit_data.append({
-                    "Date": row_date,
-                    "Expense Type": detected_category,
-                    "Claimed Amount": original_amount,
-                    "Approved Amount": approved_amount,
-                    "Status": status,
-                    "Audit Remarks": remarks
-                })
-
+    # Sort data by Date to look professional
+    audit_data = sorted(audit_data, key=lambda x: x['Date'])
     return audit_data, matched_grade
 
 # ---------- STREAMLIT UI APP ----------
@@ -187,4 +188,40 @@ if file:
     if text:
         designation = find_designation(text)
         days = find_days(text)
-        start_time
+        start_time = find_start_time(text)
+        
+        st.success("🎉 PDF Successfully Uploaded & Audited!")
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Extracted Designation", designation)
+        col2.metric("Calculated Tour Days", days)
+        col3.metric("Tour Departure Time", start_time.strftime("%I:%M %p") if start_time else "Not Detected")
+        
+        expenses, applied_grade = audit_expenses_detail(text, designation, days, start_time)
+        
+        if expenses:
+            df = pd.DataFrame(expenses)
+            st.subheader(f"📊 Live Date-Wise Audit Ledger (Applied Grid: {applied_grade})")
+            
+            # Rendering final clean table without repetitions
+            st.table(df[["Date", "Expense Type", "Claimed Amount", "Approved Amount", "Status", "Audit Remarks"]])
+            
+            total_claimed = df["Claimed Amount"].sum()
+            total_approved = df["Approved Amount"].sum()
+            
+            col_tot1, col_tot2 = st.columns(2)
+            col_tot1.info(f"Total Claimed: ₹ {total_claimed:.2f}")
+            col_tot2.success(f"Total Approved: ₹ {total_approved:.2f}")
+            
+            st.markdown("---")
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Clean Audit Report (CSV)",
+                data=csv,
+                file_name=f"TIPL_Clean_Report_{designation.replace(' ', '_')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning("⚠️ No valid individual records caught inside 'Expenses Detail' zone.")
+else:
+    st.info("ℹ]. Please upload your official T&E file to initiate live policy mapping.")
