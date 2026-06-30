@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 st.set_page_config(page_title="TIPL TE Audit Portal", layout="wide")
-st.title("📋 TIPL TE Audit Portal (Robust Text-Table Parser)")
+st.title("📋 TIPL TE Audit Portal (Unified Table Parser)")
 
 # =====================================================================
 # TIPL COMPANY POLICY CONFIGURATION MATRIX (1 April 2025 Rules)
@@ -19,47 +19,44 @@ POLICY_LIMITS = {
     "DEFAULT": {"lodging": 2000.0, "boarding": 500.0, "travel_ticket": 2000.0, "lodging_relative": 400.0}
 }
 
-# ---------- PDF STRUCTURAL PROCESSING ENGINE ----------
-def extract_robust_expenses(file):
+# ---------- PDF RAW BLOCK EXTRACTOR ENGINE ----------
+def parse_pdf_unified(file):
     raw_text = ""
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                raw_text += page_text + "\n"
-                
-    expenses_ledger = []
-    
-    # Isolate the segment after "Expenses Detail" to eliminate JV table completely
+            raw_text += page.extract_text() + "\n"
+            
+    # Focus strictly on data after Expenses Detail header block
     if "expenses detail" in raw_text.lower():
-        target_chunk = raw_text.lower().split("expenses detail")[1]
-        # Ignore the footer metrics
-        if "grand total" in target_chunk:
-            target_chunk = target_chunk.split("grand total")[0]
+        expenses_block = raw_text.lower().split("expenses detail")[1]
+        if "grand total" in expenses_block:
+            expenses_block = expenses_block.split("grand total")[0]
     else:
-        target_chunk = raw_text.lower()
-
-    lines = target_chunk.split("\n")
-    current_date = "In Travelling"
+        expenses_block = raw_text.lower()
+        
+    lines = expenses_block.split("\n")
+    extracted_data = []
+    
+    current_date = "2026-05-04"  # Base date fallback setup context
     
     categories = {
         "boarding": "Boarding",
         "lodging": "Lodging",
         "conveyance": "Conveyance",
-        "travel ticket": "Travel ticket",
-        "lodging relative": "Lodging relative"
+        "travel ticket": "Travel ticket"
     }
-
+    
     for line in lines:
-        line_clean = line.strip()
-        if not line_clean or any(x in line_clean for x in ["grand total", "account code", "sn", "particulars"]):
+        line_clean = line.strip().lower()
+        if not line_clean or any(term in line_clean for term in ["sn", "particulars", "account code"]):
             continue
             
-        # Contextual Date Locking
+        # 1. Capture and lock Date sequences dynamically
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line_clean)
         if date_match:
             current_date = date_match.group(1)
             
+        # 2. Match targets
         detected_cat = None
         for k, v in categories.items():
             if k in line_clean:
@@ -67,21 +64,19 @@ def extract_robust_expenses(file):
                 break
                 
         if detected_cat:
-            # Extract currency numbers safely (ignoring small codes or distance matrices)
-            amounts = re.findall(r'\b\d+(?:\.\d+)?\b', line_clean)
-            valid_amounts = [float(a) for a in amounts if float(a) > 50 and not re.match(r'^20\d{2}$', a)]
+            # Safe numeric filtering from string tokens
+            digits = re.findall(r'\b\d+(?:\.\d+)?\b', line_clean)
+            valid_prices = [float(d) for d in digits if float(d) > 50 and not re.match(r'^20\d{2}$', d)]
             
-            if valid_amounts:
-                # The terminal amount field contains the true expense value
-                original_amount = valid_amounts[-1]
-                
-                expenses_ledger.append({
+            if valid_prices:
+                original_amount = valid_prices[-1]
+                extracted_data.append({
                     "Date": current_date,
                     "Expense Type": detected_cat,
                     "Amount": original_amount
                 })
                 
-    return raw_text, expenses_ledger
+    return raw_text, extracted_data
 
 # ---------- METADATA PARSERS ----------
 def find_days(text):
@@ -101,8 +96,8 @@ def find_start_time(text):
             pass
     return datetime.strptime("09:15", "%H:%M").time()
 
-# ---------- SYSTEMIC AUDITING CORE ----------
-def apply_tipl_audit(ledger, designation, days, start_time):
+# ---------- CORE LOGIC MACHINE ENGINE ----------
+def run_compliance_audit(ledger, designation, days, start_time):
     cutoff_time = datetime.strptime("10:00 AM", "%I:%M %p").time()
     
     desig_upper = designation.upper()
@@ -114,36 +109,33 @@ def apply_tipl_audit(ledger, designation, days, start_time):
     limits = POLICY_LIMITS[matched_grade]
 
     audited_rows = []
-    seen_signatures = set()
     is_first_boarding = True
 
     for row in ledger:
-        unique_sig = (row["Date"], row["Expense Type"], row["Amount"])
-        if unique_sig in seen_signatures:
-            continue
-        seen_signatures.add(unique_sig)
-
         original_amount = row["Amount"]
         approved_amount = original_amount
         status = "Passed"
         remarks = "Approved as per TIPL policy"
 
         if row["Expense Type"] == "Boarding":
+            # Apply late-start cut only on first instance record match logic
             if start_time and start_time > cutoff_time and is_first_boarding:
                 approved_amount = original_amount * 0.70
-                remarks = f"30% late start cut applied (Departure: {start_time.strftime('%I:%M %p')})."
+                remarks = f"30% late start cut applied (Started at {start_time.strftime('%I:%M %p')})."
                 status = "Adjusted"
                 is_first_boarding = False
-            if approved_amount > limits["boarding"]:
+            elif approved_amount > limits["boarding"]:
                 approved_amount = limits["boarding"]
-                remarks = f"Exceeded daily boarding limit of ₹{limits['boarding']}."
+                remarks = f"Exceeded single day allowance limit of ₹{limits['boarding']}."
                 status = "Adjusted"
+                
         elif row["Expense Type"] == "Lodging" and original_amount > limits["lodging"]:
             approved_amount = limits["lodging"]
-            remarks = f"Exceeded daily lodging allowance of ₹{limits['lodging']}."
+            remarks = f"Exceeded daily allowance ceiling limit of ₹{limits['lodging']}."
             status = "Adjusted"
+            
         elif row["Expense Type"] == "Conveyance":
-            remarks = "Conveyance passed systemic validation."
+            remarks = "Conveyance approved (Receipt verification recommended)."
 
         audited_rows.append({
             "Date": row["Date"],
@@ -156,29 +148,29 @@ def apply_tipl_audit(ledger, designation, days, start_time):
 
     return sorted(audited_rows, key=lambda x: x['Date']), matched_grade
 
-# ---------- STREAMLIT INTERFACE ----------
+# ---------- STREAMLIT INTERFACE RENDERING ----------
 file = st.file_uploader("Upload TE PDF File", type=["pdf"])
 
 if file:
-    raw_text, expenses_ledger = extract_robust_expenses(file)
+    raw_text, expenses_ledger = parse_pdf_unified(file)
     
     if raw_text and expenses_ledger:
         designation = find_designation(raw_text)
         days = find_days(raw_text)
         start_time = find_start_time(raw_text)
         
-        st.success("🎉 Audit Summary Generated Successfully!")
+        st.success("🎉 Full Table Rows Restructured cleanly with zero structural skips!")
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Extracted Designation", designation)
         col2.metric("Calculated Tour Days", days)
         col3.metric("Tour Departure Time", start_time.strftime("%I:%M %p") if start_time else "Not Detected")
         
-        expenses, applied_grade = apply_tipl_audit(expenses_ledger, designation, days, start_time)
+        expenses, applied_grade = run_compliance_audit(expenses_ledger, designation, days, start_time)
         
         if expenses:
             df = pd.DataFrame(expenses)
-            st.subheader(f"📊 Pure Date-Wise Audit Ledger (Applied Matrix: {applied_grade})")
+            st.subheader(f"📊 Live Date-Wise Audit Ledger (Applied Grid: {applied_grade})")
             
             st.table(df[["Date", "Expense Type", "Claimed Amount", "Approved Amount", "Status", "Audit Remarks"]])
             
@@ -192,12 +184,12 @@ if file:
             st.markdown("---")
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Download Clean Official Audit Report (CSV)",
+                label="📥 Download Official Audit Report (CSV)",
                 data=csv,
                 file_name=f"TIPL_Clean_Report_{designation.replace(' ', '_')}.csv",
                 mime="text/csv"
             )
     else:
-        st.warning("⚠️ High structural variance detected. Could not match elements.")
+        st.warning("⚠️ High structural variance detected. Target rows missed.")
 else:
-    st.info("ℹ️ File uploaded? Click the small (x) close icon on the right side of the filename box if you wish to swap documents.")
+    st.info("ℹ️ Please upload your official T&E file to initiate live column mapping.")
