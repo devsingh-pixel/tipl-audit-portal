@@ -26,15 +26,13 @@ def parse_pdf_locally(file):
     end_date, end_time = "2026-06-11", "23:45:00"
     department = "Service-DSIC"
     designation = "TEAM LEAD / ENGINEER / SR. ENGINEER" 
-    location_type = "Other" # Angul, Durg, Bhilai are other cities
+    location_type = "Other"
     
     total_tour_days = 5
     extracted_items = []
     
-    # CRITICAL FIX: Extract strictly from the day-wise table rows, skipping accounting logs
     if "expenses detail" in raw_text.lower():
         parts = raw_text.lower().split("expenses detail")
-        # Use the mid portion where day-wise splits exist, slice off summary fields
         expenses_part = parts[1] if len(parts) > 1 else raw_text.lower()
         if "advance received" in expenses_part:
             expenses_part = expenses_part.split("advance received")[0]
@@ -47,7 +45,6 @@ def parse_pdf_locally(file):
     for line in expenses_part.split("\n"):
         line_clean = line.strip().lower()
         
-        # Guard rails to skip table headers, codes and accounting totals
         if not line_clean or any(x in line_clean for x in ["account code", "applied amount", "grand total", "total passed", "passed amount", "jv detail"]):
             continue
             
@@ -64,15 +61,11 @@ def parse_pdf_locally(file):
             expense_type = "Conveyance(Local)"
 
         if expense_type:
-            # Match only trailing amounts or amounts structured with decimals explicitly
             all_nums = re.findall(r'\b\d+(?:\.\d+)?\b', line_clean)
             valid_tokens = [n for n in all_nums if not re.match(r'^20\d{2}$', n) and float(n) > 40]
             
             if valid_tokens:
-                # Pick the absolute last value which is the amount in TIPL tables
                 val = float(valid_tokens[-1])
-                
-                # Double guard check: skip index keys or standard distance digits mistakenly read as amount
                 if val in [10.0, 15.0, 60.0, 1.0, 2.0, 3.0, 4.0, 5.0]:
                     continue
                     
@@ -107,14 +100,15 @@ def process_local_audit(meta, ledger):
             amt = r["Amount"]
             if "boarding" in exp_type.lower():
                 total_approved += min(amt, general_rules["boarding"])
-                remarks = f"Standard limit ₹{general_rules['boarding']}/day checked." [cite: 240]
+                remarks = f"Standard limit ₹{general_rules['boarding']}/day checked."
             elif "lodging" in exp_type.lower():
-                base = dsic_rules["lodging"] if meta["department"] == "Service-DSIC" else general_rules["lodging"] [cite: 240, 263]
+                # CRITICAL FIX: 'base' is strictly initialized before use to prevent NameError
+                base = dsic_rules["lodging"] if meta["department"] == "Service-DSIC" else general_rules["lodging"]
                 total_approved += min(amt, base)
-                remarks = f"Capped at ₹{base}/day as per DSIC 0-5 days matrix." [cite: 263]
+                remarks = f"Capped at ₹{base}/day as per DSIC 0-5 days matrix."
             elif "conveyance" in exp_type.lower():
                 total_approved += amt
-                remarks = "Approved on Actuals (DSIC 0-5 days dynamic timeline)." [cite: 263]
+                remarks = "Approved on Actuals (DSIC 0-5 days dynamic timeline)."
                     
         final_rows.append({
             "Expense Type": exp_type, "Days/Count": days_count, "Total Claimed": total_claimed, "Total Approved": total_approved, "Status": "Processed", "Audit Remarks": remarks
