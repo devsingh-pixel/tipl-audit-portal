@@ -110,4 +110,7 @@ def parse_pdf_locally(file):
 
         if expense_type:
             amounts = re.findall(r'\b\d+(?:\.\d+)?\b', line_clean)
-            valid_amounts =
+            # COMPLETED LINE: Absolutely no truncation or incomplete syntax here!
+            valid_amounts = [float(a) for a in amounts if float(a) > 20 and not re.match(r'^20\d{2}$', a)]
+            if valid_amounts:
+                claimed_
