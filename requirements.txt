@@ -1,3 +1,9 @@
 streamlit
 google-generativeai
 pypdf
+pdfplumber
+PyMuPDF
+pillow
+pytesseract
+pandas
+openpyxl
