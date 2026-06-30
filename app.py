@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 st.set_page_config(page_title="TIPL TE Audit Portal", layout="wide")
-st.title("📋 TIPL TE Audit Portal (Final Accurate Engine)")
+st.title("📋 TIPL TE Audit Portal (Robust Text-Table Parser)")
 
 # =====================================================================
 # TIPL COMPANY POLICY CONFIGURATION MATRIX (1 April 2025 Rules)
@@ -19,70 +19,68 @@ POLICY_LIMITS = {
     "DEFAULT": {"lodging": 2000.0, "boarding": 500.0, "travel_ticket": 2000.0, "lodging_relative": 400.0}
 }
 
-# ---------- PDF STRUCTURAL TABLE PROCESSING ENGINE ----------
-def extract_strict_expenses(file):
+# ---------- PDF STRUCTURAL PROCESSING ENGINE ----------
+def extract_robust_expenses(file):
     raw_text = ""
-    expenses_ledger = []
-    
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            raw_text += page.extract_text() + "\n"
-            tables = page.extract_tables()
-            
-            for table in tables:
-                if not table or len(table) < 2:
-                    continue
+            page_text = page.extract_text()
+            if page_text:
+                raw_text += page_text + "\n"
                 
-                # Normalize and clean table headers to find exact targets
-                headers = [str(cell).lower().replace('\n', ' ').strip() for cell in table[0] if cell]
-                
-                # We strictly want the grid that outlines individual expense particulars
-                if any("expense type" in h or "particulars" in h for h in headers):
-                    
-                    date_idx, type_idx, amount_idx = -1, -1, -1
-                    for idx, cell in enumerate(table[0]):
-                        if not cell: continue
-                        c_clean = str(cell).lower().replace('\n', ' ').strip()
-                        if "date" in c_clean: date_idx = idx
-                        elif "expense type" in c_clean or "expense  type" in c_clean: type_idx = idx
-                        elif "amount" in c_clean: amount_idx = idx
+    expenses_ledger = []
+    
+    # Isolate the segment after "Expenses Detail" to eliminate JV table completely
+    if "expenses detail" in raw_text.lower():
+        target_chunk = raw_text.lower().split("expenses detail")[1]
+        # Ignore the footer metrics
+        if "grand total" in target_chunk:
+            target_chunk = target_chunk.split("grand total")[0]
+    else:
+        target_chunk = raw_text.lower()
 
-                    # Process content data rows mapping only to safe index slots
-                    for row in table[1:]:
-                        if not row or len(row) <= max(date_idx, type_idx, amount_idx):
-                            continue
-                        
-                        row_clean = [str(c).replace('\n', ' ').strip() if c else "" for c in row]
-                        
-                        # Discard summary total blocks or metadata lines inside table splits
-                        if any(t in " ".join(row_clean).lower() for t in ["grand total", "sub total", "total", "sn"]):
-                            continue
-                            
-                        raw_date = row_clean[date_idx] if date_idx != -1 else ""
-                        raw_type = row_clean[type_idx] if type_idx != -1 else ""
-                        raw_amount = row_clean[amount_idx] if amount_idx != -1 else ""
-                        
-                        # Isolate clear standard date signature format
-                        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', raw_date)
-                        cleaned_date = date_match.group(1) if date_match else ""
-                        
-                        # Clean category mapping validation rules
-                        matched_cat = None
-                        for cat in ["boarding", "lodging", "conveyance", "travel ticket", "lodging relative"]:
-                            if cat in raw_type.lower():
-                                matched_cat = cat.capitalize()
-                                break
-                                
-                        # Extract amount from ONLY the designated amount column cell
-                        amt_match = re.search(r'(\d+(?:\.\d+)?)', raw_amount)
-                        
-                        if matched_cat and amt_match and cleaned_date:
-                            expenses_ledger.append({
-                                "Date": cleaned_date,
-                                "Expense Type": matched_cat,
-                                "Amount": float(amt_match.group(1))
-                            })
-                            
+    lines = target_chunk.split("\n")
+    current_date = "In Travelling"
+    
+    categories = {
+        "boarding": "Boarding",
+        "lodging": "Lodging",
+        "conveyance": "Conveyance",
+        "travel ticket": "Travel ticket",
+        "lodging relative": "Lodging relative"
+    }
+
+    for line in lines:
+        line_clean = line.strip()
+        if not line_clean or any(x in line_clean for x in ["grand total", "account code", "sn", "particulars"]):
+            continue
+            
+        # Contextual Date Locking
+        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line_clean)
+        if date_match:
+            current_date = date_match.group(1)
+            
+        detected_cat = None
+        for k, v in categories.items():
+            if k in line_clean:
+                detected_cat = v
+                break
+                
+        if detected_cat:
+            # Extract currency numbers safely (ignoring small codes or distance matrices)
+            amounts = re.findall(r'\b\d+(?:\.\d+)?\b', line_clean)
+            valid_amounts = [float(a) for a in amounts if float(a) > 50 and not re.match(r'^20\d{2}$', a)]
+            
+            if valid_amounts:
+                # The terminal amount field contains the true expense value
+                original_amount = valid_amounts[-1]
+                
+                expenses_ledger.append({
+                    "Date": current_date,
+                    "Expense Type": detected_cat,
+                    "Amount": original_amount
+                })
+                
     return raw_text, expenses_ledger
 
 # ---------- METADATA PARSERS ----------
@@ -103,7 +101,7 @@ def find_start_time(text):
             pass
     return datetime.strptime("09:15", "%H:%M").time()
 
-# ---------- SYSTEMIC AUDITING RULES CORE ----------
+# ---------- SYSTEMIC AUDITING CORE ----------
 def apply_tipl_audit(ledger, designation, days, start_time):
     cutoff_time = datetime.strptime("10:00 AM", "%I:%M %p").time()
     
@@ -120,7 +118,6 @@ def apply_tipl_audit(ledger, designation, days, start_time):
     is_first_boarding = True
 
     for row in ledger:
-        # Deduplication layout guard to avoid row cloning errors
         unique_sig = (row["Date"], row["Expense Type"], row["Amount"])
         if unique_sig in seen_signatures:
             continue
@@ -131,7 +128,6 @@ def apply_tipl_audit(ledger, designation, days, start_time):
         status = "Passed"
         remarks = "Approved as per TIPL policy"
 
-        # Apply granular policy checks
         if row["Expense Type"] == "Boarding":
             if start_time and start_time > cutoff_time and is_first_boarding:
                 approved_amount = original_amount * 0.70
@@ -147,7 +143,7 @@ def apply_tipl_audit(ledger, designation, days, start_time):
             remarks = f"Exceeded daily lodging allowance of ₹{limits['lodging']}."
             status = "Adjusted"
         elif row["Expense Type"] == "Conveyance":
-            remarks = "Conveyance passed systemic validation (Receipt matching mandatory)."
+            remarks = "Conveyance passed systemic validation."
 
         audited_rows.append({
             "Date": row["Date"],
@@ -160,18 +156,18 @@ def apply_tipl_audit(ledger, designation, days, start_time):
 
     return sorted(audited_rows, key=lambda x: x['Date']), matched_grade
 
-# ---------- STREAMLIT INTERFACE RENDERING ----------
+# ---------- STREAMLIT INTERFACE ----------
 file = st.file_uploader("Upload TE PDF File", type=["pdf"])
 
 if file:
-    raw_text, expenses_ledger = extract_strict_expenses(file)
+    raw_text, expenses_ledger = extract_robust_expenses(file)
     
     if raw_text and expenses_ledger:
         designation = find_designation(raw_text)
         days = find_days(raw_text)
         start_time = find_start_time(raw_text)
         
-        st.success("🎉 Columns isolated dynamically! Audit Engine initialized smoothly.")
+        st.success("🎉 Audit Summary Generated Successfully!")
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Extracted Designation", designation)
@@ -182,12 +178,26 @@ if file:
         
         if expenses:
             df = pd.DataFrame(expenses)
-            st.subheader(f"📊 Strict Date-Wise Audit Ledger (Applied Grid: {applied_grade})")
+            st.subheader(f"📊 Pure Date-Wise Audit Ledger (Applied Matrix: {applied_grade})")
             
-            # Ultra clean, scannable table view
             st.table(df[["Date", "Expense Type", "Claimed Amount", "Approved Amount", "Status", "Audit Remarks"]])
             
             total_claimed = df["Claimed Amount"].sum()
             total_approved = df["Approved Amount"].sum()
             
-            col_tot1,
+            col_tot1, col_tot2 = st.columns(2)
+            col_tot1.info(f"Total Claimed Amount: ₹ {total_claimed:.2f}")
+            col_tot2.success(f"Total AI Verified Approved: ₹ {total_approved:.2f}")
+            
+            st.markdown("---")
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Clean Official Audit Report (CSV)",
+                data=csv,
+                file_name=f"TIPL_Clean_Report_{designation.replace(' ', '_')}.csv",
+                mime="text/csv"
+            )
+    else:
+        st.warning("⚠️ High structural variance detected. Could not match elements.")
+else:
+    st.info("ℹ️ File uploaded? Click the small (x) close icon on the right side of the filename box if you wish to swap documents.")
