@@ -1,9 +1,17 @@
+import streamlit as st
+import pandas as pd
+
+st.set_page_config(
+    page_title="TIPL Audit Portal",
+    layout="wide"
+)
+
+st.title("TIPL Audit Portal")
+
+
 st.subheader("Audit Summary")
 
-# Example audit calculation
-
 lodging_rate = 390
-
 days = 5
 
 total_lodging = lodging_rate * days
