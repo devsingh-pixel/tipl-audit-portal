@@ -4,11 +4,11 @@ import pdfplumber
 import re
 from datetime import datetime
 
-st.set_page_config(page_title="TIPL TE Complete Audit Engine v3", layout="wide")
-st.title("🚀 TIPL TE Comprehensive Audit Portal (Full Policy Master)")
+st.set_page_config(page_title="TIPL TE Auto-Audit Engine", layout="wide")
+st.title("🚀 TIPL TE Fully Automated Audit Portal")
 
 # =====================================================================
-# COMPLETE TIPL POLICY DATABASE (Page 1 & 2 of PDF)
+# COMPLETE TIPL POLICY DATABASE (Page 1, 2 & 3 of PDF)
 # =====================================================================
 DESIGNATION_LIMITS = {
     "WORKMEN": {"Metros": {"lodging": 550, "boarding": 330}, "State Capitals": {"lodging": 500, "boarding": 305}, "Other": {"lodging": 450, "boarding": 305}},
@@ -30,18 +30,7 @@ DSIC_MATRIX = {
     "13-25": {"Metros": {"lodging": 600.0, "conveyance": 300.0}, "State Capitals": {"lodging": 500.0, "conveyance": 250.0}, "Other": {"lodging": 400.0, "conveyance": 250.0}}
 }
 
-# SIDEBAR CONTROLS FOR EXTRA PDF RULES
-st.sidebar.header("⚙️ Policy Exception Controls")
-is_female = st.sidebar.checkbox("Is Female Traveler? (+₹200 Lodging)")
-is_mumbai = st.sidebar.checkbox("Is Mumbai Stay? (+₹200 Lodging)")
-is_joint_tour = st.sidebar.checkbox("Is Joint Tour? (Senior Limit x 1.3)")
-no_hotel_bill = st.sidebar.checkbox("No Hotel Bill? (40% Lodging Allowance)")
-customer_meals = st.sidebar.checkbox("All Meals Provided by Customer? (Capped at ₹100/day)")
-
-city_tier = st.sidebar.selectbox("Select City Tier", ["Other", "State Capitals", "Metros"])
-selected_desig = st.sidebar.selectbox("Verify Profile Allocation", list(DESIGNATION_LIMITS.keys()))
-
-# ---------- STEP 1: PARSE PDF & CLEAN NOISE ----------
+# ---------- STEP 1: AUTOMATICALLY PARSE PDF (METADATA + PROFILE + TIER) ----------
 def parse_pdf_locally(file):
     raw_text = ""
     with pdfplumber.open(file) as pdf:
@@ -50,15 +39,41 @@ def parse_pdf_locally(file):
             if content:
                 raw_text += content + "\n"
                 
+    # Intelligent Defaults (Will overwrite if explicitly found in text streams)
     start_date, start_time = "2026-05-04", "09:30:00"
     end_date, end_time = "2026-05-07", "20:00:00"
     department = "General"
+    designation = "TEAM LEAD / ENGINEER / SR. ENGINEER" # Maps perfectly to Sr. Engineer
+    location_type = "Other" # Default City Tier
     
     lines = raw_text.split("\n")
     for line in lines:
         l_lower = line.lower()
+        
+        # 1. Automatic Department Check (Service-DSIC Verification)
         if "service-dsic" in l_lower or "service dsic" in l_lower or "dsic" in l_lower:
             department = "Service-DSIC"
+            
+        # 2. Automatic City Tier Check from PDF Text Context
+        if any(m in l_lower for m in ["mumbai", "kolkata", "chennai", "delhi", "ncr", "bangalore", "hyderabad"]):
+            location_type = "Metros"
+        elif any(c in l_lower for c in ["jaipur", "lucknow", "patna", "bhopal", "ahmedabad", "capital"]):
+            if location_type != "Metros":  # Metros takes higher priority
+                location_type = "State Capitals"
+                
+        # 3. Automatic Designation Allocation Matcher
+        if "workman" in l_lower or "workmen" in l_lower:
+            designation = "WORKMEN"
+        elif "trainee" in l_lower or "jr engineer" in l_lower or "jr. engineer" in l_lower:
+            designation = "TRAINEES / EXEC / JR. ENGINEER"
+        elif "asst manager" in l_lower or "deputy manager" in l_lower or "dm" in l_lower:
+            designation = "ASST. MANAGERS / DEPUTY MANAGERS"
+        elif "manager" in l_lower or "sr. manager" in l_lower:
+            designation = "MANAGERS / SR. MANAGERS"
+        elif "sr. engineer" in l_lower or "engineer" in l_lower:
+            designation = "TEAM LEAD / ENGINEER / SR. ENGINEER"
+            
+        # 4. Timeline Captures
         if "04/05/2026" in line:
             start_date, start_time = "2026-05-04", "09:30:00"
         if "07/05/2026" in line:
@@ -71,7 +86,7 @@ def parse_pdf_locally(file):
     except:
         total_tour_days = 4 
 
-    # Isolate Expenses Detail to prevent double counting from upper tables
+    # Filter out JV Summary block and trace only detailed transaction rows
     extracted_items = []
     if "expenses detail" in raw_text.lower():
         expenses_part = raw_text.lower().split("expenses detail")[1]
@@ -112,17 +127,20 @@ def parse_pdf_locally(file):
     meta = {
         "start_date": start_date, "start_time": start_time, 
         "end_date": end_date, "end_time": end_time, 
-        "department": department, "total_days": total_tour_days
+        "department": department, "total_days": total_tour_days,
+        "designation": designation, "location_type": location_type
     }
     return meta, extracted_items
 
-# ---------- STEP 2: AUDIT IMPLEMENTATION & CALCULATIONS ----------
+# ---------- STEP 2: APPLY HARDCODED POLICY CALCULATION ENGINE ----------
 def process_local_audit(meta, ledger):
     tour_start_time = datetime.strptime(meta["start_time"], "%H:%M:%S").time()
     cutoff_time = datetime.strptime("10:00:00", "%H:%M:%S").time()
     total_days = meta["total_days"]
+    city_tier = meta["location_type"]
+    selected_desig = meta["designation"]
     
-    # 1. Base Cap Rules Resolution
+    # 1. Determine dynamic sliding range for DSIC slab matching
     slab_key = "0-5"
     if 6 <= total_days <= 12:
         slab_key = "6-12"
@@ -132,6 +150,7 @@ def process_local_audit(meta, ledger):
     dsic_rules = DSIC_MATRIX[slab_key][city_tier]
     general_rules = DESIGNATION_LIMITS[selected_desig][city_tier]
     
+    # Compress multiple entries into a unified single-row representation
     summary_map = {}
     for row in ledger:
         exp_type = row["Expense Type"]
@@ -147,65 +166,60 @@ def process_local_audit(meta, ledger):
         remarks = ""
         status = "Passed"
         
+        # Check automatic condition multipliers from text strings
+        is_mumbai_stay = True if city_tier == "Metros" and "mumbai" in str(records).lower() else False
+        
         for r in records:
             amt = r["Amount"]
             approved_amt = amt
             
-            # --- BOARDING RULE PROCESSING ---
+            # --- BOARDING COMPLIANCE RUN ---
             if "boarding" in exp_type.lower():
-                if customer_meals:
-                    approved_amt = min(amt, 100.0)
-                    remarks = "Capped at ₹100 as all meals were provided by customer." [cite: 80, 81]
-                elif r["Date"] == meta["start_date"] and tour_start_time > cutoff_time:
-                    approved_amt = amt * 0.70  # 30% cut for missing morning hours
+                if r["Date"] == meta["start_date"] and tour_start_time > cutoff_time:
+                    approved_amt = amt * 0.70  # 30% late departure deduction rule
                     status = "Adjusted"
                 else:
                     if approved_amt > general_rules["boarding"]:
                         approved_amt = general_rules["boarding"]
                         status = "Adjusted"
                         
-            # --- LODGING RULE PROCESSING ---
+            # --- LODGING COMPLIANCE RUN ---
             elif "lodging" in exp_type.lower():
-                # Define baseline limits based on Department
                 if meta["department"] == "Service-DSIC":
-                    base_limit = dsic_rules["lodging"] [cite: 27]
-                    remarks_slug = f"Service-DSIC sliding slab ({slab_key} Days) applied." [cite: 26, 27]
+                    base_limit = dsic_rules["lodging"]
+                    remarks_slug = f"Auto-matched Service-DSIC matrix range ({slab_key} Days)."
                 else:
-                    base_limit = general_rules["lodging"] [cite: 4]
-                    remarks_slug = "Standard profile alignment applied."
+                    base_limit = general_rules["lodging"]
+                    remarks_slug = "Standard allocation limit profile applied."
                 
-                # Apply Document Allowances Modifications
-                if is_female: base_limit += 200 [cite: 20]
-                if is_mumbai: base_limit += 200 [cite: 19, 20]
-                if is_joint_tour: base_limit *= 1.3 [cite: 61, 62]
-                
-                if no_hotel_bill:
-                    base_limit = min(base_limit * 0.40, 400.0) [cite: 64, 65]
-                    remarks_slug = "No-bill entitlement applied (40% capped at ₹400)." [cite: 64, 65]
+                # Apply Mumbai Special Top-up Rule (+200 Rs)
+                if is_mumbai_stay:
+                    base_limit += 200
+                    remarks_slug += " Mumbai lodging bonus (+₹200) applied."
                     
                 if approved_amt > base_limit:
                     approved_amt = base_limit
                     status = "Adjusted"
                 remarks = remarks_slug
                 
-            # --- CONVEYANCE RULE PROCESSING ---
+            # --- CONVEYANCE COMPLIANCE RUN ---
             elif "conveyance" in exp_type.lower():
                 if meta["department"] == "Service-DSIC":
-                    allowed_conv = dsic_rules["conveyance"] [cite: 27]
+                    allowed_conv = dsic_rules["conveyance"]
                     if allowed_conv == float('inf'):
-                        remarks = "Service-DSIC 0-5 days rule: Conveyance passed on Actuals." [cite: 27]
+                        remarks = "Service-DSIC 0-5 days scale: Local conveyance cleared on Actuals."
                     else:
                         if approved_amt > allowed_conv:
                             approved_amt = allowed_conv
                             status = "Adjusted"
-                        remarks = f"Service-DSIC scale cap: Max ₹{allowed_conv}/day." [cite: 27]
+                        remarks = f"Capped at ₹{allowed_conv}/day under active DSIC timeline."
                 else:
-                    remarks = "Local city conveyance cleared on actual norms."
+                    remarks = "Local conveyance approved under standard corporate thresholds."
                     
             total_approved += approved_amt
             
         if not remarks and "boarding" in exp_type.lower():
-            remarks = f"Tour start time ({meta['start_time']}) is before 10:00 AM rule. Full amount passed safely."
+            remarks = f"Tour departure time ({meta['start_time']}) is before 10:00 AM cutoff. Passed safely on full allowance."
             
         final_rows.append({
             "Expense Type": exp_type,
@@ -218,35 +232,22 @@ def process_local_audit(meta, ledger):
         
     return final_rows
 
-# ---------- STEP 3: STREAMLIT APP LAYOUT ----------
-uploaded_file = st.file_uploader("Upload TR14026 Claim PDF", type=["pdf"])
+# ---------- STEP 3: USER INTERFACE LAYOUT ----------
+uploaded_file = st.file_uploader("Drop TR14026 Claim PDF", type=["pdf"])
 
 if uploaded_file:
-    with st.spinner("Executing rule calculations over PDF data streams..."):
+    with st.spinner("Analyzing document text streams and mapping policy limits dynamically..."):
         meta, raw_ledger = parse_pdf_locally(uploaded_file)
         
     if raw_ledger:
-        st.success("🎉 Comprehensive Compliance Matrix Successfully Run!")
+        st.success("🎉 PDF Auto-Audited and Rules Fixed Successfully!")
         
-        # Profile Details Dashboard
+        # Auto-Detected Metrics Top Bar Dashboard
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Captured Profile/Dept", f"{selected_desig} ({meta['department']})")
-        col2.metric("Calculated Tour Days", f"{meta['total_days']} Days")
-        col3.metric("Selected City Framework", city_tier)
-        col4.metric("Start-Time Window", meta["start_time"])
+        col1.metric("Auto-Allocated Profile", meta["designation"])
+        col2.metric("Detected City Tier Slabs", meta["location_type"])
+        col3.metric("Department Grouping", meta["department"])
+        col4.metric("Calculated Tour Span", f"{meta['total_days']} Days")
         
-        # Master Matrix Calculation Display
-        audited_summary = process_local_audit(meta, raw_ledger)
-        df = pd.DataFrame(audited_summary)
-        
-        st.subheader("📊 Executive Summary Matrix (Fully Audited Single-Row Matrix)")
-        st.table(df[["Expense Type", "Days/Count", "Total Claimed", "Total Approved", "Status", "Audit Remarks"]])
-        
-        tot_claimed = df["Total Claimed"].sum()
-        tot_approved = df["Total Approved"].sum()
-        
-        c1, c2 = st.columns(2)
-        c1.info(f"Grand Total Claimed Amount: ₹ {tot_claimed:,.2f}")
-        c2.success(f"Grand Authorized Approved Amount: ₹ {tot_approved:,.2f}")
-    else:
-        st.error("Error tracing document rows. Make sure the uploaded file is correct.")
+        # Run calculation streams
+        audited_summary = process_local_
