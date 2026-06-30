@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 st.set_page_config(page_title="TIPL TE Audit Portal", layout="wide")
-st.title("📋 TIPL TE Audit Portal (Unified Table Parser)")
+st.title("📋 TIPL TE Audit Portal (Consolidated Summary View)")
 
 # =====================================================================
 # TIPL COMPANY POLICY CONFIGURATION MATRIX (1 April 2025 Rules)
@@ -24,7 +24,9 @@ def parse_pdf_unified(file):
     raw_text = ""
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            raw_text += page.extract_text() + "\n"
+            page_text = page.extract_text()
+            if page_text:
+                raw_text += page_text + "\n"
             
     # Focus strictly on data after Expenses Detail header block
     if "expenses detail" in raw_text.lower():
@@ -37,13 +39,12 @@ def parse_pdf_unified(file):
     lines = expenses_block.split("\n")
     extracted_data = []
     
-    current_date = "2026-05-04"  # Base date fallback setup context
-    
     categories = {
         "boarding": "Boarding",
         "lodging": "Lodging",
         "conveyance": "Conveyance",
-        "travel ticket": "Travel ticket"
+        "travel ticket": "Travel ticket",
+        "lodging relative": "Lodging relative"
     }
     
     for line in lines:
@@ -51,12 +52,6 @@ def parse_pdf_unified(file):
         if not line_clean or any(term in line_clean for term in ["sn", "particulars", "account code"]):
             continue
             
-        # 1. Capture and lock Date sequences dynamically
-        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line_clean)
-        if date_match:
-            current_date = date_match.group(1)
-            
-        # 2. Match targets
         detected_cat = None
         for k, v in categories.items():
             if k in line_clean:
@@ -64,14 +59,12 @@ def parse_pdf_unified(file):
                 break
                 
         if detected_cat:
-            # Safe numeric filtering from string tokens
             digits = re.findall(r'\b\d+(?:\.\d+)?\b', line_clean)
             valid_prices = [float(d) for d in digits if float(d) > 50 and not re.match(r'^20\d{2}$', d)]
             
             if valid_prices:
                 original_amount = valid_prices[-1]
                 extracted_data.append({
-                    "Date": current_date,
                     "Expense Type": detected_cat,
                     "Amount": original_amount
                 })
@@ -96,8 +89,8 @@ def find_start_time(text):
             pass
     return datetime.strptime("09:15", "%H:%M").time()
 
-# ---------- CORE LOGIC MACHINE ENGINE ----------
-def run_compliance_audit(ledger, designation, days, start_time):
+# ---------- CONSOLIDATED SUMMARY AUDIT ENGINE ----------
+def run_consolidated_audit(ledger, designation, tour_days, start_time):
     cutoff_time = datetime.strptime("10:00 AM", "%I:%M %p").time()
     
     desig_upper = designation.upper()
@@ -108,45 +101,60 @@ def run_compliance_audit(ledger, designation, days, start_time):
             break
     limits = POLICY_LIMITS[matched_grade]
 
-    audited_rows = []
-    is_first_boarding = True
-
+    # Step 1: Group and Sum same expense types + count days/instances
+    summary_map = {}
     for row in ledger:
-        original_amount = row["Amount"]
+        exp_type = row["Expense Type"]
+        if exp_type not in summary_map:
+            summary_map[exp_type] = {"total_claimed": 0.0, "count_days": 0}
+        summary_map[exp_type]["total_claimed"] += row["Amount"]
+        summary_map[exp_type]["count_days"] += 1
+
+    audited_summary = []
+
+    # Step 2: Apply TIPL Matrix over the consolidated values
+    for exp_type, metrics in summary_map.items():
+        original_amount = metrics["total_claimed"]
+        item_days = metrics["count_days"]
         approved_amount = original_amount
         status = "Passed"
-        remarks = "Approved as per TIPL policy"
+        remarks = "Fully Approved as per TIPL policy"
 
-        if row["Expense Type"] == "Boarding":
-            # Apply late-start cut only on first instance record match logic
-            if start_time and start_time > cutoff_time and is_first_boarding:
-                approved_amount = original_amount * 0.70
-                remarks = f"30% late start cut applied (Started at {start_time.strftime('%I:%M %p')})."
+        if exp_type == "Boarding":
+            max_allowed = limits["boarding"] * item_days
+            # Check late departure cut on total logic if applicable
+            if start_time and start_time > cutoff_time:
+                # Apply 30% cut on the first day's worth of limit split proportionally
+                penalty = (limits["boarding"] * 0.30)
+                approved_amount = original_amount - penalty
+                remarks = f"30% late start cut applied on Day 1 base."
                 status = "Adjusted"
-                is_first_boarding = False
-            elif approved_amount > limits["boarding"]:
-                approved_amount = limits["boarding"]
-                remarks = f"Exceeded single day allowance limit of ₹{limits['boarding']}."
+            
+            if approved_amount > max_allowed:
+                approved_amount = max_allowed
+                remarks = f"Capped at ceiling: ₹{limits['boarding']} × {item_days} Days = ₹{max_allowed}."
                 status = "Adjusted"
                 
-        elif row["Expense Type"] == "Lodging" and original_amount > limits["lodging"]:
-            approved_amount = limits["lodging"]
-            remarks = f"Exceeded daily allowance ceiling limit of ₹{limits['lodging']}."
-            status = "Adjusted"
-            
-        elif row["Expense Type"] == "Conveyance":
-            remarks = "Conveyance approved (Receipt verification recommended)."
+        elif exp_type == "Lodging":
+            max_allowed = limits["lodging"] * item_days
+            if original_amount > max_allowed:
+                approved_amount = max_allowed
+                remarks = f"Capped at ceiling: ₹{limits['lodging']} × {item_days} Days = ₹{max_allowed}."
+                status = "Adjusted"
+                
+        elif exp_type == "Conveyance":
+            remarks = "Conveyance approved subject to receipt validation."
 
-        audited_rows.append({
-            "Date": row["Date"],
-            "Expense Type": row["Expense Type"],
-            "Claimed Amount": original_amount,
-            "Approved Amount": approved_amount,
+        audited_summary.append({
+            "Expense Type": exp_type,
+            "Days/Count": item_days,
+            "Total Claimed": original_amount,
+            "Total Approved": approved_amount,
             "Status": status,
             "Audit Remarks": remarks
         })
 
-    return sorted(audited_rows, key=lambda x: x['Date']), matched_grade
+    return audited_summary, matched_grade
 
 # ---------- STREAMLIT INTERFACE RENDERING ----------
 file = st.file_uploader("Upload TE PDF File", type=["pdf"])
@@ -159,23 +167,24 @@ if file:
         days = find_days(raw_text)
         start_time = find_start_time(raw_text)
         
-        st.success("🎉 Full Table Rows Restructured cleanly with zero structural skips!")
+        st.success("🎉 PDF Parsed & Consolidated Successfully!")
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Extracted Designation", designation)
         col2.metric("Calculated Tour Days", days)
         col3.metric("Tour Departure Time", start_time.strftime("%I:%M %p") if start_time else "Not Detected")
         
-        expenses, applied_grade = run_compliance_audit(expenses_ledger, designation, days, start_time)
+        expenses, applied_grade = run_consolidated_audit(expenses_ledger, designation, days, start_time)
         
         if expenses:
             df = pd.DataFrame(expenses)
-            st.subheader(f"📊 Live Date-Wise Audit Ledger (Applied Grid: {applied_grade})")
+            st.subheader(f"📊 Consolidated Summary Table (Applied Matrix: {applied_grade})")
             
-            st.table(df[["Date", "Expense Type", "Claimed Amount", "Approved Amount", "Status", "Audit Remarks"]])
+            # Ultra clean UI: Expense type is unique with a direct Days column
+            st.table(df[["Expense Type", "Days/Count", "Total Claimed", "Total Approved", "Status", "Audit Remarks"]])
             
-            total_claimed = df["Claimed Amount"].sum()
-            total_approved = df["Approved Amount"].sum()
+            total_claimed = df["Total Claimed"].sum()
+            total_approved = df["Total Approved"].sum()
             
             col_tot1, col_tot2 = st.columns(2)
             col_tot1.info(f"Total Claimed Amount: ₹ {total_claimed:.2f}")
@@ -184,12 +193,12 @@ if file:
             st.markdown("---")
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Download Official Audit Report (CSV)",
+                label="📥 Download Summary Audit Report (CSV)",
                 data=csv,
-                file_name=f"TIPL_Clean_Report_{designation.replace(' ', '_')}.csv",
+                file_name=f"TIPL_Summary_Report_{designation.replace(' ', '_')}.csv",
                 mime="text/csv"
             )
     else:
-        st.warning("⚠️ High structural variance detected. Target rows missed.")
+        st.warning("⚠️ Could not aggregate elements. Check the PDF text formatting.")
 else:
-    st.info("ℹ️ Please upload your official T&E file to initiate live column mapping.")
+    st.info("ℹ️ Please upload your official T&E file to view the consolidated matrix.")
