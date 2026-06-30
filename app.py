@@ -1,51 +1,33 @@
-import streamlit as st
-import pandas as pd
-import pdfplumber
+st.subheader("Audit Summary")
 
-st.set_page_config(
-    page_title="TIPL Audit Portal",
-    layout="wide"
-)
+# Example audit calculation
 
-st.title("TIPL Audit Portal")
+lodging_rate = 390
 
-st.write("Upload PDF file for audit review")
+days = 5
 
-uploaded_file = st.file_uploader(
-    "Upload PDF",
-    type=["pdf"]
-)
+total_lodging = lodging_rate * days
 
-if uploaded_file:
 
-    st.success("PDF uploaded successfully")
+audit_data = {
+    "Particular": [
+        "Lodging Eligible Days",
+        "Lodging Rate Per Day",
+        "Total Lodging Amount",
+        "24 Hour Rule Check",
+        "Rail Travel Rule"
+    ],
 
-    text = ""
+    "Result": [
+        f"{days} Days",
+        f"₹ {lodging_rate}",
+        f"₹ {total_lodging}",
+        "Checked",
+        "Checked as per travel time"
+    ]
+}
 
-    with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text
 
-    st.subheader("Extracted Data")
+df = pd.DataFrame(audit_data)
 
-    st.text_area(
-        "PDF Content",
-        text,
-        height=400
-    )
-
-    st.subheader("Audit Summary")
-
-    data = {
-        "Status": ["Document Read"],
-        "Pages Extracted": [len(text)]
-    }
-
-    df = pd.DataFrame(data)
-
-    st.table(df)
-
-else:
-    st.info("Please upload PDF file to start audit")
+st.table(df)
