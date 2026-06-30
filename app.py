@@ -30,19 +30,32 @@ def parse_pdf_locally(file):
     total_tour_days = 5
     extracted_items = []
 
-    for line in raw_text.split("\n"):
+    # CRITICAL FIX: Slicing only the main day-wise item rows block
+    if "expenses detail" in raw_text.lower():
+        parts = raw_text.lower().split("expenses detail")
+        # standardizing the center body text segment
+        expenses_part = parts[1] if len(parts) > 1 else raw_text.lower()
+        if "advance received" in expenses_part:
+            expenses_part = expenses_part.split("advance received")[0]
+        if "expense summary" in expenses_part:
+            expenses_part = expenses_part.split("expense summary")[0]
+    else:
+        expenses_part = raw_text.lower()
+
+    # Date persistent memory management
+    current_date = start_date 
+    
+    for line in expenses_part.split("\n"):
         line_clean = line.strip().lower()
         
-        # CRITICAL REJECTION: Summary wale pure section ko aur headers ko bypass karna
+        # Filter headers and duplicate summary markers
         if not line_clean or any(x in line_clean for x in ["account code", "applied amount", "grand total", "total passed", "passed amount", "jv detail", "expense summary"]):
             continue
             
-        # PURE IMMUNITY: Sirf aur sirf wahi line pick hogi jisme real travel date framework maujood ho
+        # Extract date if available on this specific table row
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line_clean)
-        if not date_match:
-            continue
-            
-        current_date = date_match.group(1)
+        if date_match:
+            current_date = date_match.group(1)
             
         expense_type = None
         if "boarding" in line_clean:
@@ -58,7 +71,7 @@ def parse_pdf_locally(file):
             
             if valid_tokens:
                 val = float(valid_tokens[-1])
-                # Filter out Serial numbers or distances that get mixed up
+                # Skip false indicators like serial number, distance indices
                 if val in [10.0, 15.0, 60.0, 1.0, 2.0, 3.0, 4.0, 5.0]:
                     continue
                     
@@ -111,7 +124,7 @@ uploaded_file = st.file_uploader("📂 Upload TR14026 Claim PDF Here", type=["pd
 if uploaded_file:
     meta, raw_ledger = parse_pdf_locally(uploaded_file)
     if raw_ledger:
-        st.success("🎉 PDF Parsed Correctly!")
+        st.success("🎉 PDF Parsed and Re-indexed Successfully!")
         audited_summary = process_local_audit(meta, raw_ledger)
         df = pd.DataFrame(audited_summary)
         st.table(df)
