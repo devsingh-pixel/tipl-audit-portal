@@ -11,11 +11,11 @@ st.title("📋 TIPL TE Audit Portal (FY 2025-26 Compliant)")
 # TIPL COMPANY POLICY CONFIGURATION MATRIX (As per 1 April 2025 Rules)
 # =====================================================================
 POLICY_LIMITS = {
-    "MANAGEMENT": {"lodging": 6000.0, "boarding": 1500.0},
-    "GRADE A": {"lodging": 4500.0, "boarding": 1000.0},
-    "GRADE B": {"lodging": 3500.0, "boarding": 800.0},
-    "GRADE C": {"lodging": 2500.0, "boarding": 600.0},
-    "DEFAULT": {"lodging": 2000.0, "boarding": 500.0}
+    "MANAGEMENT": {"lodging": 6000.0, "boarding": 1500.0, "travel_ticket": 10000.0, "lodging_relative": 1000.0},
+    "GRADE A": {"lodging": 4500.0, "boarding": 1000.0, "travel_ticket": 7000.0, "lodging_relative": 800.0},
+    "GRADE B": {"lodging": 3500.0, "boarding": 800.0, "travel_ticket": 5000.0, "lodging_relative": 600.0},
+    "GRADE C": {"lodging": 2500.0, "boarding": 600.0, "travel_ticket": 3000.0, "lodging_relative": 500.0},
+    "DEFAULT": {"lodging": 2000.0, "boarding": 500.0, "travel_ticket": 2000.0, "lodging_relative": 400.0}
 }
 
 # ---------- PDF TEXT EXTRACTION ----------
@@ -46,7 +46,6 @@ def find_designation(text):
     return "Not Found"
 
 def find_start_time(text):
-    # Highly advanced regex to catch variations like "Dep: 11:00", "Start Time: 10:30 AM", "Journey Time: 15:45"
     match = re.search(r'(?:Start|Departure|Dep\.?|Journey)(?:\s+Time)?:\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)', text, re.IGNORECASE)
     if match:
         time_str = match.group(1).strip()
@@ -62,10 +61,6 @@ def find_start_time(text):
 # ---------- CORE AUTOMATED AUDIT ENGINE ----------
 def process_and_audit_expenses(text, designation, days, start_time):
     data = []
-    # Catching rows with or without descriptions
-    pattern = r'\d+\s+\d+\s+([A-Za-z()]+).*?(\d+(?:\.\d+)?)'
-    rows = re.findall(pattern, text, re.DOTALL)
-    
     cutoff_time = datetime.strptime("10:00 AM", "%I:%M %p").time()
     
     # Smart Matching for Designation Substrings
@@ -78,94 +73,85 @@ def process_and_audit_expenses(text, designation, days, start_time):
             
     limits = POLICY_LIMITS[matched_grade]
     
-    for name, amount in rows:
-        expense_head = name.strip().capitalize()
-        if expense_head.lower() in ["conveyance", "lodging", "boarding"]:
-            original_amount = float(amount)
-            approved_amount = original_amount
-            remarks = "Fully Approved as per TIPL policy"
-            status = "Passed"
+    # All 5 Required Expense Categories target config mapping
+    target_mappings = {
+        "boarding": "Boarding",
+        "lodging": "Lodging",
+        "conveyance": "Conveyance",
+        "travel ticket": "Travel ticket",
+        "lodging relative": "Lodging relative"
+    }
+    
+    # Scanning document line-by-line to prevent structural pattern failure
+    for line in text.split('\n'):
+        line_clean = line.strip()
+        if not line_clean:
+            continue
             
-            # RULE 1: Boarding Constraints Check
-            if expense_head.lower() == "boarding":
-                max_boarding_allowed = limits["boarding"] * days
-                
-                # Apply 10:00 AM 30% Deduction Cut
-                if start_time and start_time > cutoff_time:
-                    approved_amount = original_amount * 0.70
-                    remarks = f"30% Cut Applied due to late departure ({start_time.strftime('%I:%M %p')})."
-                    status = "Adjusted"
-                
-                # Cross check Cap Ceiling Limit
-                if approved_amount > max_boarding_allowed:
-                    approved_amount = max_boarding_allowed
-                    remarks += f" Over-budget! Capped at max policy limit of ₹{max_boarding_allowed}."
-                    status = "Adjusted"
+        for key, display_name in target_mappings.items():
+            # Standard boundary regex matching for single or multiple phrase keywords
+            if re.search(r'\b' + re.escape(key) + r'\b', line_clean.lower()):
+                # Extracting numerical parts inside the localized raw row string context
+                amounts = re.findall(r'\d+(?:\.\d+)?', line_clean)
+                if amounts:
+                    original_amount = float(amounts[-1]) # Selecting terminal numeric sequence as total cost
+                    approved_amount = original_amount
+                    remarks = "Fully Approved as per TIPL policy"
+                    status = "Passed"
                     
-            # RULE 2: Lodging Constraints Check
-            elif expense_head.lower() == "lodging":
-                max_lodging_allowed = limits["lodging"] * days
-                if original_amount > max_lodging_allowed:
-                    approved_amount = max_lodging_allowed
-                    remarks = f"Exceeded limit! Capped at max allowance of ₹{max_lodging_allowed} for {matched_grade}."
-                    status = "Adjusted"
-            
-            # RULE 3: Conveyance Policy Handlers
-            elif expense_head.lower() == "conveyance":
-                remarks = "Conveyance passed audit checklist (manager verification mandatory)."
-            
-            data.append({
-                "Expense Head": expense_head,
-                "Claimed Amount": original_amount,
-                "Approved Amount": approved_amount,
-                "Status": status,
-                "Audit Remarks": remarks
-            })
-            
+                    # 1. Boarding Auditing Rule Execution Block
+                    if key == "boarding":
+                        max_boarding_allowed = limits["boarding"] * days
+                        if start_time and start_time > cutoff_time:
+                            approved_amount = original_amount * 0.70
+                            remarks = f"30% Cut Applied due to late departure ({start_time.strftime('%I:%M %p')})."
+                            status = "Adjusted"
+                        
+                        if approved_amount > max_boarding_allowed:
+                            approved_amount = max_boarding_allowed
+                            remarks += f" Over-budget! Capped at max daily limit of ₹{max_boarding_allowed}."
+                            status = "Adjusted"
+                            
+                    # 2. Lodging Auditing Rule Execution Block
+                    elif key == "lodging":
+                        max_lodging_allowed = limits["lodging"] * days
+                        if original_amount > max_lodging_allowed:
+                            approved_amount = max_lodging_allowed
+                            remarks = f"Exceeded ceiling barrier! Capped at max allowance of ₹{max_lodging_allowed}."
+                            status = "Adjusted"
+                            
+                    # 3. Lodging Relative Auditing Rule Execution Block
+                    elif key == "lodging relative":
+                        max_rel_allowed = limits["lodging_relative"] * days
+                        if original_amount > max_rel_allowed:
+                            approved_amount = max_rel_allowed
+                            remarks = f"Relative accommodation capped at flat policy boundary of ₹{max_rel_allowed}."
+                            status = "Adjusted"
+                            
+                    # 4. Travel Ticket Auditing Rule Execution Block
+                    elif key == "travel ticket":
+                        max_ticket_allowed = limits["travel_ticket"]
+                        if original_amount > max_ticket_allowed:
+                            approved_amount = max_ticket_allowed
+                            remarks = f"Ticket ceiling breached! Capped at maximum allocation threshold of ₹{max_ticket_allowed}."
+                            status = "Adjusted"
+                            
+                    # 5. Conveyance Auditing Rule Execution Block
+                    elif key == "conveyance":
+                        remarks = "Conveyance passed systemic validation (Receipt matching mandatory)."
+                    
+                    data.append({
+                        "Expense Head": display_name,
+                        "Claimed Amount": original_amount,
+                        "Approved Amount": approved_amount,
+                        "Status": status,
+                        "Audit Remarks": remarks
+                    })
+                    break # Avoid running secondary pattern loops on the same line buffer
+                    
     return data, matched_grade
 
 # ---------- STREAMLIT UI APP ----------
 file = st.file_uploader("Upload TE PDF File", type=["pdf"])
 
 if file:
-    text = extract_text(file)
-    
-    if text:
-        designation = find_designation(text)
-        days = find_days(text)
-        start_time = find_start_time(text)
-        
-        st.success("🎉 PDF Successfully Uploaded & Parsed!")
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Extracted Designation", designation)
-        col2.metric("Calculated Tour Days", days)
-        col3.metric("Tour Start Time", start_time.strftime("%I:%M %p") if start_time else "Not Detected")
-        
-        expenses, applied_grade = process_and_audit_expenses(text, designation, days, start_time)
-        
-        if expenses:
-            df = pd.DataFrame(expenses)
-            st.subheader(f"📊 TIPL Policy Compliance Summary (Applied Grid: {applied_grade})")
-            
-            st.table(df[["Expense Head", "Claimed Amount", "Approved Amount", "Status", "Audit Remarks"]])
-            
-            total_claimed = df["Claimed Amount"].sum()
-            total_approved = df["Approved Amount"].sum()
-            
-            col_tot1, col_tot2 = st.columns(2)
-            col_tot1.info(f"Total Claimed: ₹ {total_claimed:.2f}")
-            col_tot2.success(f"Total Approved: ₹ {total_approved:.2f}")
-            
-            st.markdown("---")
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Official Audit Report (CSV)",
-                data=csv,
-                file_name=f"TIPL_Audit_Report_{designation.replace(' ', '_')}.csv",
-                mime="text/csv"
-            )
-        else:
-            st.warning("⚠️ No valid expense entries (Boarding/Lodging/Conveyance) caught from text.")
-else:
-    st.info("ℹ️ Please upload your official T&E file to initiate live policy mapping.")
