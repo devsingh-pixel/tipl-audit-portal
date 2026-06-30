@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 
-# ---------------- RULE MASTER ----------------
+# ---------------- TIPL RULE MASTER ----------------
 
 TE_RULES = {
 
@@ -33,7 +33,6 @@ TE_RULES = {
 }
 
 
-
 # ---------------- PDF TEXT ----------------
 
 def extract_text(file):
@@ -49,9 +48,7 @@ def extract_text(file):
             if page_text:
                 text += page_text + "\n"
 
-
     return text
-
 
 
 
@@ -59,75 +56,79 @@ def extract_text(file):
 
 def get_designation(text):
 
-    for des in TE_RULES.keys():
+    for designation in TE_RULES:
 
-        if des.lower() in text.lower():
+        if designation.lower() in text.lower():
 
-            return des
+            return designation
 
 
     return "Executive"
 
 
 
-
-
-# ---------------- RAIL TIME DAYS ----------------
+# ---------------- 24 HOUR RULE ----------------
 
 def calculate_days(text):
 
-
-    pattern = r'(\d{2}[-/]\d{2}[-/]\d{4}).{0,20}?(\d{2}:\d{2})'
-
-
-    dates = re.findall(pattern,text)
+    pattern = r'(\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2}).*?(\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2})'
 
 
-    if len(dates)>=2:
+    result = re.search(
+        pattern,
+        text,
+        re.DOTALL
+    )
+
+
+    if result:
 
 
         start = datetime.strptime(
 
-            dates[0][0]+" "+dates[0][1],
+            result.group(1),
 
-            "%d-%m-%Y %H:%M"
+            "%d/%m/%Y %H:%M:%S"
 
         )
 
 
         end = datetime.strptime(
 
-            dates[-1][0]+" "+dates[-1][1],
+            result.group(2),
 
-            "%d-%m-%Y %H:%M"
+            "%d/%m/%Y %H:%M:%S"
 
         )
 
 
-        hours = (end-start).total_seconds()/3600
+        total_hours = (end-start).total_seconds()/3600
 
 
-        days = int(hours//24)+1
+        days = int(total_hours//24)
 
 
-        return days, hours
+        if total_hours % 24 > 0:
+
+            days += 1
+
+
+        return days,total_hours,end
 
 
 
-    return 1,0
-
+    return 0,0,None
 
 
 
 
 # ---------------- AMOUNT FIND ----------------
 
-def find_amount(text, keyword):
+def find_amount(text,keyword):
 
+    result = re.search(
 
-    match = re.search(
-
-        keyword+r".{0,20}?(\d+[,]*\d*)",
+        keyword+r".{0,30}?(\d+[,\d]*)",
 
         text,
 
@@ -136,9 +137,11 @@ def find_amount(text, keyword):
     )
 
 
-    if match:
+    if result:
 
-        return int(match.group(1).replace(",",""))
+        return int(
+            result.group(1).replace(",","")
+        )
 
 
     return 0
@@ -146,14 +149,13 @@ def find_amount(text, keyword):
 
 
 
-
-# ---------------- APP ----------------
+# ---------------- MAIN APP ----------------
 
 
 st.title("📋 TIPL Travel Expense Audit Portal")
 
 
-uploaded_file = st.file_uploader(
+file = st.file_uploader(
 
     "Upload TE Claim PDF",
 
@@ -163,13 +165,13 @@ uploaded_file = st.file_uploader(
 
 
 
-if uploaded_file:
+if file:
+
+
+    text = extract_text(file)
 
 
     st.success("PDF Uploaded Successfully")
-
-
-    text = extract_text(uploaded_file)
 
 
 
@@ -177,7 +179,7 @@ if uploaded_file:
 
 
 
-    days,hours = calculate_days(text)
+    days,hours,end_time = calculate_days(text)
 
 
 
@@ -185,17 +187,42 @@ if uploaded_file:
 
 
 
-    # expenses
-
-
     ticket = find_amount(text,"ticket")
 
 
 
-    boarding = rule["boarding"] * days
+    # allowance calculation
+
+    boarding_rate = rule["boarding"]
+
+    lodging_rate = rule["lodging"]
 
 
-    lodging = rule["lodging"] * days
+
+    boarding = boarding_rate * days
+
+    lodging = lodging_rate * days
+
+
+
+
+    # 10 AM 30% cut rule
+
+    cut_status = "No Cut"
+
+
+
+    if end_time:
+
+
+        if end_time.hour >= 10:
+
+
+            boarding = boarding * 0.70
+
+            lodging = lodging * 0.70
+
+            cut_status = "30% Cut Applied"
 
 
 
@@ -205,11 +232,8 @@ if uploaded_file:
 
 
 
-
-    # HEADER
-
-
     col1,col2,col3 = st.columns(3)
+
 
 
     col1.metric(
@@ -219,14 +243,14 @@ if uploaded_file:
 
 
     col2.metric(
-        "Travel Hours",
-        f"{hours:.1f}"
+        "Eligible Days",
+        days
     )
 
 
     col3.metric(
-        "Eligible Days",
-        days
+        "Travel Hours",
+        f"{hours:.2f}"
     )
 
 
@@ -236,7 +260,6 @@ if uploaded_file:
 
 
     st.subheader("📊 Audit Summary")
-
 
 
 
@@ -254,6 +277,7 @@ if uploaded_file:
         ],
 
 
+
         "Days":[
 
             "-",
@@ -265,28 +289,16 @@ if uploaded_file:
         ],
 
 
-        "Rate":[
-
-            "Actual",
-
-            f"₹ {rule['lodging']}",
-
-            f"₹ {rule['boarding']}"
-
-        ],
-
 
         "Amount":[
 
             f"₹ {ticket}",
 
-            f"₹ {lodging}",
+            f"₹ {lodging:.0f}",
 
-            f"₹ {boarding}"
+            f"₹ {boarding:.0f}"
 
         ]
-
-
 
     })
 
@@ -301,47 +313,42 @@ if uploaded_file:
 
 
 
-    rules = pd.DataFrame({
+    rule_df = pd.DataFrame({
 
-        "Check":[
+        "Rule":[
 
             "24 Hour Rule",
 
-            "Rail Travel Rule",
+            "Designation Limit",
 
-            "Designation Limit"
+            "10 AM Rule"
 
         ],
 
 
         "Status":[
 
-            "✅ Passed",
+            "✅ Applied",
 
-            "✅ Passed",
+            "✅ Applied",
 
-            "✅ Applied"
+            cut_status
 
         ]
 
     })
 
 
-
-    st.table(rules)
-
+    st.table(rule_df)
 
 
 
     st.success(
-
-        f"Final Claim Amount : ₹ {total}"
-
+        f"Final Claim Amount : ₹ {total:.0f}"
     )
 
 
 
 else:
-
 
     st.info("Please upload TE PDF")
