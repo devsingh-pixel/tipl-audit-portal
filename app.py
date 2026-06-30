@@ -4,12 +4,12 @@ import pdfplumber
 import re
 from datetime import datetime
 
-# 1. Page Configuration and Title (Always at the top)
-st.set_page_config(page_title="TIPL TE Fully Automated Audit Engine", layout="wide")
+# 1. Page Configuration (Always at the very top)
+st.set_page_config(page_title="TIPL TE Auto-Audit Engine", layout="wide")
 st.title("🚀 TIPL TE Fully Automated Audit Portal")
 
 # =====================================================================
-# HARDCODED POLICY MATRIX (As per TIPL PDF Rules)
+# COMPLETE TIPL POLICY DATABASE (Page 1, 2 & 3 of PDF)
 # =====================================================================
 DESIGNATION_LIMITS = {
     "WORKMEN": {"Metros": {"lodging": 550, "boarding": 330}, "State Capitals": {"lodging": 500, "boarding": 305}, "Other": {"lodging": 450, "boarding": 305}},
@@ -20,7 +20,7 @@ DESIGNATION_LIMITS = {
     "MANAGERS / SR. MANAGERS": {"Metros": {"lodging": 1350, "boarding": 600}, "State Capitals": {"lodging": 1250, "boarding": 575}, "Other": {"lodging": 1150, "boarding": 575}}
 }
 
-# Service-DSIC Slab Matrix (Page 3 Rules)
+# Service-DSIC Sliding Scale Matrix (Page 3 of PDF)
 DSIC_MATRIX = {
     "0-5": {"Metros": {"lodging": 950.0, "conveyance": float('inf')}, "State Capitals": {"lodging": 850.0, "conveyance": float('inf')}, "Other": {"lodging": 750.0, "conveyance": float('inf')}},
     "6-12": {"Metros": {"lodging": 800.0, "conveyance": 300.0}, "State Capitals": {"lodging": 700.0, "conveyance": 250.0}, "Other": {"lodging": 600.0, "conveyance": 250.0}},
@@ -36,7 +36,7 @@ def parse_pdf_locally(file):
             if content:
                 raw_text += content + "\n"
                 
-    # Default parameters fallback
+    # Intelligent Defaults (Overwritten dynamically if strings match)
     start_date, start_time = "2026-05-04", "09:30:00"
     end_date, end_time = "2026-05-07", "20:00:00"
     department = "General"
@@ -47,18 +47,18 @@ def parse_pdf_locally(file):
     for line in lines:
         l_lower = line.lower()
         
-        # 1. Auto-detect Service-DSIC
+        # 1. Automatic Profile Verification (Service-DSIC)
         if "service-dsic" in l_lower or "service dsic" in l_lower or "dsic" in l_lower:
             department = "Service-DSIC"
             
-        # 2. Auto-detect City Tier (Metros / Capitals)
+        # 2. Automatic City Tier Lookup 
         if any(m in l_lower for m in ["mumbai", "kolkata", "chennai", "delhi", "ncr", "bangalore", "hyderabad"]):
             location_type = "Metros"
         elif any(c in l_lower for c in ["jaipur", "lucknow", "patna", "bhopal", "ahmedabad", "capital"]):
             if location_type != "Metros":
                 location_type = "State Capitals"
                 
-        # 3. Auto-detect Profile Designation Allocation
+        # 3. Automatic Designation Group Alignment
         if "workman" in l_lower or "workmen" in l_lower:
             designation = "WORKMEN"
         elif "trainee" in l_lower or "jr engineer" in l_lower or "jr. engineer" in l_lower:
@@ -73,7 +73,7 @@ def parse_pdf_locally(file):
     except:
         total_tour_days = 4 
 
-    # Isolate from "Expenses Detail" (Bypasses the JV Summary block)
+    # Strictly slice the transaction detail block to prevent double totals
     extracted_items = []
     if "expenses detail" in raw_text.lower():
         expenses_part = raw_text.lower().split("expenses detail")[1]
@@ -106,116 +106,3 @@ def parse_pdf_locally(file):
             if valid_amounts:
                 claimed_amount = valid_amounts[-1]
                 extracted_items.append({
-                    "Date": current_date,
-                    "Expense Type": expense_type,
-                    "Amount": claimed_amount
-                })
-                
-    meta = {
-        "start_date": start_date, "start_time": start_time, 
-        "end_date": end_date, "end_time": end_time, 
-        "department": department, "total_days": total_tour_days,
-        "designation": designation, "location_type": location_type
-    }
-    return meta, extracted_items
-
-# ---------- STEP 2: CALCULATIONS & AUDITING ENGINE ----------
-def process_local_audit(meta, ledger):
-    tour_start_time = datetime.strptime(meta["start_time"], "%H:%M:%S").time()
-    cutoff_time = datetime.strptime("10:00:00", "%H:%M:%S").time()
-    total_days = meta["total_days"]
-    city_tier = meta["location_type"]
-    selected_desig = meta["designation"]
-    
-    slab_key = "0-5"
-    if 6 <= total_days <= 12:
-        slab_key = "6-12"
-    elif 13 <= total_days <= 25:
-        slab_key = "13-25"
-        
-    dsic_rules = DSIC_MATRIX[slab_key][city_tier]
-    general_rules = DESIGNATION_LIMITS[selected_desig][city_tier]
-    
-    # Consolidate repeating rows to get single-row output per expense type
-    summary_map = {}
-    for row in ledger:
-        exp_type = row["Expense Type"]
-        if exp_type not in summary_map:
-            summary_map[exp_type] = []
-        summary_map[exp_type].append(row)
-        
-    final_rows = []
-    for exp_type, records in summary_map.items():
-        days_count = len(records)
-        total_claimed = sum(r["Amount"] for r in records)
-        total_approved = 0.0
-        remarks = ""
-        status = "Passed"
-        
-        is_mumbai_stay = True if city_tier == "Metros" and "mumbai" in str(records).lower() else False
-        
-        for r in records:
-            amt = r["Amount"]
-            approved_amt = amt
-            
-            # 1. BOARDING RULE PROCESSING
-            if "boarding" in exp_type.lower():
-                if r["Date"] == meta["start_date"] and tour_start_time > cutoff_time:
-                    approved_amt = amt * 0.70
-                    status = "Adjusted"
-                else:
-                    if approved_amt > general_rules["boarding"]:
-                        approved_amt = general_rules["boarding"]
-                        status = "Adjusted"
-                        
-            # 2. LODGING RULE PROCESSING (Service-DSIC)
-            elif "lodging" in exp_type.lower():
-                if meta["department"] == "Service-DSIC":
-                    base_limit = dsic_rules["lodging"]
-                    remarks_slug = f"Auto-applied Service-DSIC matrix range ({slab_key} Days)."
-                else:
-                    base_limit = general_rules["lodging"]
-                    remarks_slug = "Standard designation limit applied."
-                
-                if is_mumbai_stay:
-                    base_limit += 200
-                    remarks_slug += " Mumbai lodging bonus (+₹200) applied."
-                    
-                if approved_amt > base_limit:
-                    approved_amt = base_limit
-                    status = "Adjusted"
-                remarks = remarks_slug
-                
-            # 3. CONVEYANCE RULE PROCESSING
-            elif "conveyance" in exp_type.lower():
-                if meta["department"] == "Service-DSIC":
-                    allowed_conv = dsic_rules["conveyance"]
-                    if allowed_conv == float('inf'):
-                        remarks = "Service-DSIC 0-5 days scale: Local conveyance approved on Actuals."
-                    else:
-                        if approved_amt > allowed_conv:
-                            approved_amt = allowed_conv
-                            status = "Adjusted"
-                        remarks = f"Capped at ₹{allowed_conv}/day under active DSIC timeline."
-                else:
-                    remarks = "Local conveyance approved under standard thresholds."
-                    
-            total_approved += approved_amt
-            
-        if not remarks and "boarding" in exp_type.lower():
-            remarks = f"Tour start time ({meta['start_time']}) is before 10:00 AM cutoff. Fully passed without penalty."
-            
-        final_rows.append({
-            "Expense Type": exp_type,
-            "Days/Count": days_count,
-            "Total Claimed": total_claimed,
-            "Total Approved": total_approved,
-            "Status": status,
-            "Audit Remarks": remarks
-        })
-        
-    return final_rows
-
-# ---------- STEP 3: THE UPLOAD BUTTON & INTERFACE PRESENTATION ----------
-# This file_uploader is placed cleanly at the core layout level
-uploaded_file = st.file_uploader("📂 Upload TR14026 Claim PDF", type=
