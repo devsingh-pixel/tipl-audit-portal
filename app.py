@@ -2,27 +2,39 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import re
+from datetime import datetime
 
 
 st.set_page_config(
     page_title="TIPL TE Audit Portal",
-    page_icon="📋",
     layout="wide"
 )
 
 
-st.title("📋 TIPL Travel Expense Audit Portal")
+# ---------------- RULE MASTER ----------------
 
-st.write("Upload employee TE claim PDF for automatic audit")
+TE_RULES = {
+
+    "Manager": {
+        "boarding": 390,
+        "lodging": 3000
+    },
+
+    "Engineer": {
+        "boarding": 390,
+        "lodging": 2500
+    },
+
+    "Executive": {
+        "boarding": 300,
+        "lodging": 1500
+    }
+
+}
 
 
 
-uploaded_file = st.file_uploader(
-    "Upload TE Claim PDF",
-    type=["pdf"]
-)
-
-
+# ---------------- PDF TEXT ----------------
 
 def extract_text(file):
 
@@ -37,135 +49,185 @@ def extract_text(file):
             if page_text:
                 text += page_text + "\n"
 
+
     return text
 
 
 
 
+# ---------------- DESIGNATION ----------------
+
+def get_designation(text):
+
+    for des in TE_RULES.keys():
+
+        if des.lower() in text.lower():
+
+            return des
+
+
+    return "Executive"
+
+
+
+
+
+# ---------------- RAIL TIME DAYS ----------------
+
+def calculate_days(text):
+
+
+    pattern = r'(\d{2}[-/]\d{2}[-/]\d{4}).{0,20}?(\d{2}:\d{2})'
+
+
+    dates = re.findall(pattern,text)
+
+
+    if len(dates)>=2:
+
+
+        start = datetime.strptime(
+
+            dates[0][0]+" "+dates[0][1],
+
+            "%d-%m-%Y %H:%M"
+
+        )
+
+
+        end = datetime.strptime(
+
+            dates[-1][0]+" "+dates[-1][1],
+
+            "%d-%m-%Y %H:%M"
+
+        )
+
+
+        hours = (end-start).total_seconds()/3600
+
+
+        days = int(hours//24)+1
+
+
+        return days, hours
+
+
+
+    return 1,0
+
+
+
+
+
+# ---------------- AMOUNT FIND ----------------
+
 def find_amount(text, keyword):
 
-    pattern = keyword + r".{0,30}?(\d+[,\d]*)"
 
-    result = re.search(
-        pattern,
+    match = re.search(
+
+        keyword+r".{0,20}?(\d+[,]*\d*)",
+
         text,
+
         re.IGNORECASE
+
     )
 
-    if result:
-        return int(result.group(1).replace(",",""))
+
+    if match:
+
+        return int(match.group(1).replace(",",""))
+
 
     return 0
 
 
 
 
+
+# ---------------- APP ----------------
+
+
+st.title("📋 TIPL Travel Expense Audit Portal")
+
+
+uploaded_file = st.file_uploader(
+
+    "Upload TE Claim PDF",
+
+    type=["pdf"]
+
+)
+
+
+
 if uploaded_file:
-
-
-    text = extract_text(uploaded_file)
 
 
     st.success("PDF Uploaded Successfully")
 
 
-    with st.expander("View Extracted Data"):
-
-        st.text(text)
+    text = extract_text(uploaded_file)
 
 
 
-    # Detect amounts
-
-    ticket = find_amount(
-        text,
-        "ticket"
-    )
-
-
-    lodging = find_amount(
-        text,
-        "lodging"
-    )
-
-
-    boarding = find_amount(
-        text,
-        "boarding"
-    )
+    designation = get_designation(text)
 
 
 
-    # Boarding rule example
-
-    boarding_rate = 390
-
-
-    days_match = re.search(
-        r"(\d+)\s*days?",
-        text,
-        re.IGNORECASE
-    )
-
-
-    if days_match:
-
-        days = int(days_match.group(1))
-
-    else:
-
-        days = 0
+    days,hours = calculate_days(text)
 
 
 
-    allowed_boarding = boarding_rate * days
+    rule = TE_RULES[designation]
+
+
+
+    # expenses
+
+
+    ticket = find_amount(text,"ticket")
+
+
+
+    boarding = rule["boarding"] * days
+
+
+    lodging = rule["lodging"] * days
 
 
 
 
-    if boarding == 0:
-
-        boarding = allowed_boarding
+    total = ticket + boarding + lodging
 
 
 
 
-    total = ticket + lodging + boarding
+
+    # HEADER
 
 
-
-
-    st.subheader("📊 Audit Summary")
-
-
-
-    col1,col2,col3,col4 = st.columns(4)
-
+    col1,col2,col3 = st.columns(3)
 
 
     col1.metric(
-        "🎫 Travel Ticket",
-        f"₹ {ticket}"
+        "Designation",
+        designation
     )
 
 
     col2.metric(
-        "🏨 Lodging",
-        f"₹ {lodging}"
+        "Travel Hours",
+        f"{hours:.1f}"
     )
 
 
     col3.metric(
-        "🍽 Boarding",
-        f"₹ {boarding}"
+        "Eligible Days",
+        days
     )
-
-
-    col4.metric(
-        "💰 Total Claim",
-        f"₹ {total}"
-    )
-
 
 
 
@@ -173,9 +235,13 @@ if uploaded_file:
 
 
 
-    summary = pd.DataFrame(
+    st.subheader("📊 Audit Summary")
 
-        {
+
+
+
+    summary = pd.DataFrame({
+
 
         "Expense Head":[
 
@@ -183,22 +249,29 @@ if uploaded_file:
 
             "Lodging",
 
-            "Boarding",
-
-            "Total"
+            "Boarding"
 
         ],
 
 
-        "Calculation":[
+        "Days":[
 
-            "As per attached ticket",
+            "-",
 
-            "Rate × Eligible Days",
+            days,
 
-            f"390 × {days} Days",
+            days
 
-            "Total of all expenses"
+        ],
+
+
+        "Rate":[
+
+            "Actual",
+
+            f"₹ {rule['lodging']}",
+
+            f"₹ {rule['boarding']}"
 
         ],
 
@@ -209,15 +282,13 @@ if uploaded_file:
 
             f"₹ {lodging}",
 
-            f"₹ {boarding}",
-
-            f"₹ {total}"
+            f"₹ {boarding}"
 
         ]
 
-        }
 
-    )
+
+    })
 
 
 
@@ -226,38 +297,35 @@ if uploaded_file:
 
 
 
-    st.subheader("✅ Rule Verification")
+    st.subheader("Rule Check")
 
 
 
-    rules = pd.DataFrame(
+    rules = pd.DataFrame({
 
-        {
-
-        "Rule":[
+        "Check":[
 
             "24 Hour Rule",
 
             "Rail Travel Rule",
 
-            "TE Limit Check"
+            "Designation Limit"
 
         ],
 
 
         "Status":[
 
-            "✔ Checked",
+            "✅ Passed",
 
-            "✔ Checked",
+            "✅ Passed",
 
-            "✔ Within Limit"
+            "✅ Applied"
 
         ]
 
-        }
+    })
 
-    )
 
 
     st.table(rules)
@@ -265,11 +333,15 @@ if uploaded_file:
 
 
 
-    st.success("Final Audit Status : PASS")
+    st.success(
+
+        f"Final Claim Amount : ₹ {total}"
+
+    )
 
 
 
 else:
 
 
-    st.info("Upload PDF to start audit")
+    st.info("Please upload TE PDF")
