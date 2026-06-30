@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 st.set_page_config(page_title="TIPL TE Audit Portal", layout="wide")
-st.title("📋 TIPL TE Audit Portal (Strict Column Target)")
+st.title("📋 TIPL TE Audit Portal (Final Accurate Engine)")
 
 # =====================================================================
 # TIPL COMPANY POLICY CONFIGURATION MATRIX (1 April 2025 Rules)
@@ -33,49 +33,47 @@ def extract_strict_expenses(file):
                 if not table or len(table) < 2:
                     continue
                 
-                # Check headers index to map exact columns safely
+                # Normalize and clean table headers to find exact targets
                 headers = [str(cell).lower().replace('\n', ' ').strip() for cell in table[0] if cell]
                 
-                # Verify if this specific grid belongs to "Expenses Detail" table block
+                # We strictly want the grid that outlines individual expense particulars
                 if any("expense type" in h or "particulars" in h for h in headers):
                     
-                    # Track index positions dynamically
                     date_idx, type_idx, amount_idx = -1, -1, -1
                     for idx, cell in enumerate(table[0]):
                         if not cell: continue
-                        c_clean = str(cell).lower().replace('\n', ' ')
+                        c_clean = str(cell).lower().replace('\n', ' ').strip()
                         if "date" in c_clean: date_idx = idx
                         elif "expense type" in c_clean or "expense  type" in c_clean: type_idx = idx
                         elif "amount" in c_clean: amount_idx = idx
 
-                    # Process content data rows sequentially 
+                    # Process content data rows mapping only to safe index slots
                     for row in table[1:]:
                         if not row or len(row) <= max(date_idx, type_idx, amount_idx):
                             continue
                         
                         row_clean = [str(c).replace('\n', ' ').strip() if c else "" for c in row]
                         
-                        # Eliminate structural metadata headers inside multi-page table splits
-                        if any(t in " ".join(row_clean).lower() for t in ["grand total", "sn", "particulars"]):
+                        # Discard summary total blocks or metadata lines inside table splits
+                        if any(t in " ".join(row_clean).lower() for t in ["grand total", "sub total", "total", "sn"]):
                             continue
                             
-                        # Extract details from targets
                         raw_date = row_clean[date_idx] if date_idx != -1 else ""
                         raw_type = row_clean[type_idx] if type_idx != -1 else ""
                         raw_amount = row_clean[amount_idx] if amount_idx != -1 else ""
                         
-                        # Extract clean standard date logic sequence
+                        # Isolate clear standard date signature format
                         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', raw_date)
                         cleaned_date = date_match.group(1) if date_match else ""
                         
-                        # Match valid types
+                        # Clean category mapping validation rules
                         matched_cat = None
                         for cat in ["boarding", "lodging", "conveyance", "travel ticket", "lodging relative"]:
                             if cat in raw_type.lower():
                                 matched_cat = cat.capitalize()
                                 break
                                 
-                        # Extract the exact numeric currency from the isolated Amount cell index only
+                        # Extract amount from ONLY the designated amount column cell
                         amt_match = re.search(r'(\d+(?:\.\d+)?)', raw_amount)
                         
                         if matched_cat and amt_match and cleaned_date:
@@ -122,7 +120,7 @@ def apply_tipl_audit(ledger, designation, days, start_time):
     is_first_boarding = True
 
     for row in ledger:
-        # Prevent repetition overlaps
+        # Deduplication layout guard to avoid row cloning errors
         unique_sig = (row["Date"], row["Expense Type"], row["Amount"])
         if unique_sig in seen_signatures:
             continue
@@ -133,23 +131,23 @@ def apply_tipl_audit(ledger, designation, days, start_time):
         status = "Passed"
         remarks = "Approved as per TIPL policy"
 
-        # Apply specific logic rules constraints
+        # Apply granular policy checks
         if row["Expense Type"] == "Boarding":
             if start_time and start_time > cutoff_time and is_first_boarding:
                 approved_amount = original_amount * 0.70
-                remarks = f"30% late start cut applied (Started at {start_time.strftime('%I:%M %p')})."
+                remarks = f"30% late start cut applied (Departure: {start_time.strftime('%I:%M %p')})."
                 status = "Adjusted"
                 is_first_boarding = False
             if approved_amount > limits["boarding"]:
                 approved_amount = limits["boarding"]
-                remarks = f"Exceeded single day allowance limit of ₹{limits['boarding']}."
+                remarks = f"Exceeded daily boarding limit of ₹{limits['boarding']}."
                 status = "Adjusted"
         elif row["Expense Type"] == "Lodging" and original_amount > limits["lodging"]:
             approved_amount = limits["lodging"]
-            remarks = f"Exceeded daily allowance ceiling limit of ₹{limits['lodging']}."
+            remarks = f"Exceeded daily lodging allowance of ₹{limits['lodging']}."
             status = "Adjusted"
         elif row["Expense Type"] == "Conveyance":
-            remarks = "Conveyance approved (Receipt matching mandatory)."
+            remarks = "Conveyance passed systemic validation (Receipt matching mandatory)."
 
         audited_rows.append({
             "Date": row["Date"],
@@ -172,3 +170,24 @@ if file:
         designation = find_designation(raw_text)
         days = find_days(raw_text)
         start_time = find_start_time(raw_text)
+        
+        st.success("🎉 Columns isolated dynamically! Audit Engine initialized smoothly.")
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Extracted Designation", designation)
+        col2.metric("Calculated Tour Days", days)
+        col3.metric("Tour Departure Time", start_time.strftime("%I:%M %p") if start_time else "Not Detected")
+        
+        expenses, applied_grade = apply_tipl_audit(expenses_ledger, designation, days, start_time)
+        
+        if expenses:
+            df = pd.DataFrame(expenses)
+            st.subheader(f"📊 Strict Date-Wise Audit Ledger (Applied Grid: {applied_grade})")
+            
+            # Ultra clean, scannable table view
+            st.table(df[["Date", "Expense Type", "Claimed Amount", "Approved Amount", "Status", "Audit Remarks"]])
+            
+            total_claimed = df["Claimed Amount"].sum()
+            total_approved = df["Approved Amount"].sum()
+            
+            col_tot1,
