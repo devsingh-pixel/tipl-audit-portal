@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 
-# ---------------- TIPL RULE MASTER ----------------
+# ================= RULE MASTER =================
 
 TE_RULES = {
 
@@ -33,7 +33,7 @@ TE_RULES = {
 }
 
 
-# ---------------- PDF TEXT ----------------
+# ================= PDF TEXT =================
 
 def extract_text(file):
 
@@ -43,50 +43,50 @@ def extract_text(file):
 
         for page in pdf.pages:
 
-            page_text = page.extract_text()
+            if page.extract_text():
 
-            if page_text:
-                text += page_text + "\n"
+                text += page.extract_text() + "\n"
 
     return text
 
 
 
-# ---------------- DESIGNATION ----------------
+# ================= DESIGNATION =================
 
-def get_designation(text):
+def find_designation(text):
 
-    for designation in TE_RULES:
+    for d in TE_RULES:
 
-        if designation.lower() in text.lower():
+        if d.lower() in text.lower():
 
-            return designation
+            return d
 
 
     return "Executive"
 
 
 
-# ---------------- 24 HOUR RULE ----------------
 
-def calculate_days(text):
+# ================= DATE CALCULATION =================
+
+def get_days(text):
 
     pattern = r'(\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2}).*?(\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2})'
 
 
-    result = re.search(
+    data = re.search(
         pattern,
         text,
         re.DOTALL
     )
 
 
-    if result:
+    if data:
 
 
         start = datetime.strptime(
 
-            result.group(1),
+            data.group(1),
 
             "%d/%m/%Y %H:%M:%S"
 
@@ -95,44 +95,46 @@ def calculate_days(text):
 
         end = datetime.strptime(
 
-            result.group(2),
+            data.group(2),
 
             "%d/%m/%Y %H:%M:%S"
 
         )
 
 
-        total_hours = (end-start).total_seconds()/3600
+        hours = (end-start).total_seconds()/3600
 
 
-        days = int(total_hours//24)
+        days = int(hours/24)
 
 
-        if total_hours % 24 > 0:
+        if hours % 24:
 
             days += 1
 
 
-        return days,total_hours,end
+        return days,end
 
 
 
-    return 0,0,None
+    return 0,None
 
 
 
 
-# ---------------- AMOUNT FIND ----------------
 
-def find_amount(text,keyword):
+# ================= AMOUNT FIND =================
+
+def get_amount(text,word):
+
 
     result = re.search(
 
-        keyword+r".{0,30}?(\d+[,\d]*)",
+        word+r".{0,40}?(\d+[,\d]*)",
 
         text,
 
-        re.IGNORECASE
+        re.I
 
     )
 
@@ -149,17 +151,18 @@ def find_amount(text,keyword):
 
 
 
-# ---------------- MAIN APP ----------------
+
+# ================= MAIN =================
 
 
-st.title("📋 TIPL Travel Expense Audit Portal")
+st.title("📋 TIPL TE Audit Portal")
 
 
 file = st.file_uploader(
 
     "Upload TE Claim PDF",
 
-    type=["pdf"]
+    type="pdf"
 
 )
 
@@ -171,100 +174,65 @@ if file:
     text = extract_text(file)
 
 
-    st.success("PDF Uploaded Successfully")
+
+    designation = find_designation(text)
 
 
 
-    designation = get_designation(text)
+    days,end_time = get_days(text)
 
 
 
-    days,hours,end_time = calculate_days(text)
+    rules = TE_RULES[designation]
 
 
 
-    rule = TE_RULES[designation]
+    # CLAIMED AMOUNT
 
-
-
-    ticket = find_amount(text,"ticket")
-
-
-
-    # allowance calculation
-
-    boarding_rate = rule["boarding"]
-
-    lodging_rate = rule["lodging"]
-
-
-
-    boarding = boarding_rate * days
-
-    lodging = lodging_rate * days
-
-
-
-
-    # 10 AM 30% cut rule
-
-    cut_status = "No Cut"
-
-
-
-    if end_time:
-
-
-        if end_time.hour >= 10:
-
-
-            boarding = boarding * 0.70
-
-            lodging = lodging * 0.70
-
-            cut_status = "30% Cut Applied"
-
-
-
-
-    total = ticket + boarding + lodging
-
-
-
-
-    col1,col2,col3 = st.columns(3)
-
-
-
-    col1.metric(
-        "Designation",
-        designation
+    ticket_claim = get_amount(
+        text,
+        "ticket"
     )
 
 
-    col2.metric(
-        "Eligible Days",
-        days
+    lodging_claim = get_amount(
+        text,
+        "lodging"
     )
 
 
-    col3.metric(
-        "Travel Hours",
-        f"{hours:.2f}"
+    boarding_claim = get_amount(
+        text,
+        "boarding"
     )
 
 
 
-    st.divider()
+
+    # ALLOWED AMOUNT
+
+
+    allowed_lodging = rules["lodging"] * days
+
+
+    allowed_boarding = rules["boarding"] * days
 
 
 
-    st.subheader("📊 Audit Summary")
+
+    # 10 AM CUT RULE
+
+    if end_time and end_time.hour >= 10:
+
+
+        allowed_boarding *= 0.70
+
+        allowed_lodging *= 0.70
+
 
 
 
     summary = pd.DataFrame({
-
 
         "Expense Head":[
 
@@ -275,7 +243,6 @@ if file:
             "Boarding"
 
         ],
-
 
 
         "Days":[
@@ -289,66 +256,94 @@ if file:
         ],
 
 
+        "Claimed Amount":[
 
-        "Amount":[
+            ticket_claim,
 
-            f"₹ {ticket}",
+            lodging_claim,
 
-            f"₹ {lodging:.0f}",
+            boarding_claim
 
-            f"₹ {boarding:.0f}"
+        ],
+
+
+        "Allowed Amount":[
+
+            ticket_claim,
+
+            int(allowed_lodging),
+
+            int(allowed_boarding)
 
         ]
 
     })
 
+
+
+    summary["Status"] = summary.apply(
+
+        lambda x:
+
+        "PASS"
+
+        if x["Claimed Amount"] <= x["Allowed Amount"]
+
+        else "EXCESS",
+
+        axis=1
+
+    )
+
+
+
+
+    st.subheader("📊 Audit Summary")
+
+
+    st.write(
+        f"Designation : {designation}"
+    )
+
+
+    st.write(
+        f"Eligible Days : {days}"
+    )
 
 
     st.table(summary)
 
 
 
+    total_claim = summary["Claimed Amount"].sum()
 
-    st.subheader("Rule Check")
-
-
-
-    rule_df = pd.DataFrame({
-
-        "Rule":[
-
-            "24 Hour Rule",
-
-            "Designation Limit",
-
-            "10 AM Rule"
-
-        ],
-
-
-        "Status":[
-
-            "✅ Applied",
-
-            "✅ Applied",
-
-            cut_status
-
-        ]
-
-    })
-
-
-    st.table(rule_df)
+    total_allowed = summary["Allowed Amount"].sum()
 
 
 
-    st.success(
-        f"Final Claim Amount : ₹ {total:.0f}"
+    st.metric(
+        "Total Claim",
+        f"₹ {total_claim}"
     )
+
+
+    st.metric(
+        "Allowed",
+        f"₹ {total_allowed}"
+    )
+
+
+
+    if total_claim <= total_allowed:
+
+        st.success("FINAL AUDIT : PASS")
+
+    else:
+
+        st.error("FINAL AUDIT : NEED REVIEW")
 
 
 
 else:
 
-    st.info("Please upload TE PDF")
+    st.info("Upload TE Claim PDF")
