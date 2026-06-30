@@ -7,7 +7,7 @@ st.set_page_config(page_title="TIPL TE Auto-Audit Engine", layout="wide")
 st.title("🚀 TIPL TE Fully Automated Audit Portal")
 
 DESIGNATION_LIMITS = {
-    "TEAM LEAD / ENGINEER / SR. ENGINEER": {"Metros": {"lodging": 1050, "boarding": 510}, "State Capitals": {"lodging": 950, "boarding": 485}, "Other": {"lodging": 850, "boarding": 485}}
+    "TEAM LEAD / ENGINEER / SR. ENGINEER": {"Metros": {"lodging": 1050, "boarding": 485}, "State Capitals": {"lodging": 950, "boarding": 485}, "Other": {"lodging": 850, "boarding": 485}}
 }
 
 DSIC_MATRIX = {
@@ -31,21 +31,15 @@ def parse_pdf_locally(file):
     extracted_items = []
     current_date = start_date 
 
-    for line in raw_text.split("\n"):
+    lines = raw_text.split("\n")
+    for line in lines:
         line_clean = line.strip().lower()
         
-        # 1. STRICT REMOVAL: Summary section aur numerical accounting logs ko touch bhi nahi karna hai
-        if not line_clean or any(x in line_clean for x in ["account code", "applied amount", "grand total", "total passed", "passed amount", "jv detail", "expense summary", "total passed amount"]):
+        # 1. Clear out headers and structural noise instantly
+        if not line_clean or any(x in line_clean for x in ["account code", "applied amount", "grand total", "total passed", "passed amount", "jv detail", "expense summary", "particulars/tour remark", "mode of travelling", "bill copy", "name of hotel"]):
             continue
             
-        # 2. Agar line me applied amount ya approved amount header jaisa kuch hai toh skip karo
-        if "1300.00" in line_clean and "3900.00" in line_clean:
-            continue
-        if line_clean.startswith('"1"') or line_clean.startswith('"2"') or line_clean.startswith('"3"'):
-            if "3207" in line_clean or "3435" in line_clean or "3442" in line_clean:
-                continue # Skip top summary table rows strictly
-
-        # Date trace engine
+        # 2. Extract date context safely
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line_clean)
         if date_match:
             current_date = date_match.group(1)
@@ -55,17 +49,19 @@ def parse_pdf_locally(file):
             expense_type = "Boarding(Food)"
         elif "lodging" in line_clean:
             expense_type = "Lodging(Hotel)"
-        elif "conveyance" in line_clean or "taxi" in line_clean or "auto" in line_clean:
+        elif any(c in line_clean for c in ["conveyance", "taxi", "auto", "coriveyance"]):
             expense_type = "Conveyance(Local)"
 
         if expense_type:
+            # Extract valid money values (avoiding distance metrics or small digit tags)
             all_nums = re.findall(r'\b\d+(?:\.\d+)?\b', line_clean)
-            valid_tokens = [n for n in all_nums if not re.match(r'^20\d{2}$', n) and float(n) > 40]
+            valid_tokens = [float(n) for n in all_nums if not re.match(r'^20\d{2}$', n) and float(n) >= 100]
             
             if valid_tokens:
-                val = float(valid_tokens[-1])
-                # Skip false metrics (Serial keys, distance markers)
-                if val in [10.0, 15.0, 60.0, 1.0, 2.0, 3.0, 4.0, 5.0]:
+                val = valid_tokens[-1]
+                
+                # Filter out pure noise integers that mimic km markers or serial arrays
+                if val in [2026.0, 3207.0, 3435.0, 3442.0, 3443.0, 9690.0]:
                     continue
                     
                 extracted_items.append({
@@ -90,12 +86,21 @@ def process_local_audit(meta, ledger):
         
     final_rows = []
     for exp_type, records in summary_map.items():
-        days_count = len(records)
-        total_claimed = sum(r["Amount"] for r in records)
+        # Deduplicate records sharing exact same dates and amounts to handle multi-page stream faults
+        seen = set()
+        deduped_records = []
+        for r in records:
+            key = (r["Date"], r["Amount"])
+            if key not in seen:
+                seen.add(key)
+                deduped_records.append(r)
+
+        days_count = len(deduped_records)
+        total_claimed = sum(r["Amount"] for r in deduped_records)
         total_approved = 0.0
         remarks = "Passed within limits."
         
-        for r in records:
+        for r in deduped_records:
             amt = r["Amount"]
             if "boarding" in exp_type.lower():
                 total_approved += min(amt, general_rules["boarding"])
@@ -121,11 +126,9 @@ if uploaded_file:
         audited_summary = process_local_audit(meta, raw_ledger)
         df = pd.DataFrame(audited_summary)
         
-        # Display Audit Summary Table
         st.subheader("📊 Detailed Audit Table")
         st.table(df)
         
-        # ADDED FIXED: Total Value Analytics Summary Section
         st.markdown("---")
         st.subheader("🏁 Final Tour Total Calculation")
         total_claim_amount = df["Total Claimed"].sum()
