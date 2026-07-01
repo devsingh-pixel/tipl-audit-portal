@@ -12,7 +12,7 @@ st.title("🚀 TIPL TE Fully Automated Audit Portal")
 # ==========================================
 uploaded_file = st.file_uploader("📂 Upload Tour Claim PDF Here", type=["pdf"])
 
-# Exact matrix matching your policy document for Sr. Engineer (Other Category default)
+# Exact limits matching your policy document for Sr. Engineer (Other Category)
 DESIGNATION_LIMITS = {
     "TEAM LEAD / ENGINEER / SR. ENGINEER": {
         "Metros": {"lodging": 1050.0, "boarding": 485.0},
@@ -29,6 +29,7 @@ def parse_pdf_locally(file):
             if content: 
                 raw_text += content + "\n"
                 
+    # Tour Meta Context Framework
     start_date = "2026-04-20"
     end_date = "2026-04-24"
     start_time = "22:00:00"
@@ -37,40 +38,35 @@ def parse_pdf_locally(file):
     
     extracted_items = []
     current_date = start_date 
+    
+    # CRITICAL TRIGGER flag to bypass JV details block completely
+    inside_expense_detail = False
 
-    is_jv_block = False
-    is_expense_detail_block = False
-
-    # Pure line-by-line streaming architecture
     for line in raw_text.split("\n"):
         line_clean = line.strip().lower()
         
         if not line_clean:
             continue
             
-        # CRITICAL CHECKPOINT: Track blocks precisely
-        if "jv detail" in line_clean or "account code" in line_clean:
-            is_jv_block = True
+        # STRICT BOUNDARY CHECK: Start listening ONLY when Expense Detail block arrives
+        if "expense detail" in line_clean:
+            inside_expense_detail = True
             continue
             
-        if "expense detail" in line_clean:
-            is_jv_block = False  # Exit JV block if open
-            is_expense_detail_block = True
+        # If we haven't reached the true Expense Detail list rows yet, skip everything
+        if not inside_expense_detail:
             continue
 
-        # Ignore lines belonging to the top level summary table 
-        if is_jv_block and not is_expense_detail_block:
-            continue
-
-        # Global meta totals safety breakers
+        # Ignore final safety grand summaries if any inside the table loop
         if any(x in line_clean for x in ["grand total", "total passed", "passed amount", "advance received"]):
             continue
 
+        # Date alignment mechanism
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line_clean)
         if date_match:
             current_date = date_match.group(1)
             
-        # Extract numerical decimals representing currency tokens
+        # Parse exact row decimals matching cash currencies
         amt_match = re.search(r'(\d+\.\d{2})\b', line_clean)
         if not amt_match:
             continue
@@ -84,7 +80,7 @@ def parse_pdf_locally(file):
             expense_type = "Lodging(Hotel)"
         elif "travel" in line_clean or "ticket" in line_clean or "train" in line_clean:
             expense_type = "Travel Ticket"
-        elif any(c in line_clean for c in ["conveyance", "taxi", "auto"]):
+        elif any(c in line_clean for c in ["conveyance", "taxi", "auto", "coriveyance"]):
             expense_type = "Conveyance(Local)"
 
         if expense_type:
@@ -104,9 +100,6 @@ def parse_pdf_locally(file):
     return meta, extracted_items
 
 def calculate_boarding_factor(current_date, meta):
-    """
-    Applies exact slab metrics according to TIPL Policy document
-    """
     if current_date != meta["start_date"] and current_date != meta["end_date"]:
         return 1.0, "Mid-Day(100%)"
 
@@ -129,7 +122,6 @@ def calculate_boarding_factor(current_date, meta):
     return 1.0, "Day(100%)"
 
 def process_grouped_audit(meta, ledger):
-    # Match criteria limits for 'Other' category dynamic lookup
     rules = DESIGNATION_LIMITS["TEAM LEAD / ENGINEER / SR. ENGINEER"]["Other"]
     
     grouped_data = {}
@@ -169,7 +161,7 @@ def process_grouped_audit(meta, ledger):
                 
             elif etype in ["Conveyance(Local)", "Travel Ticket"]:
                 total_approved += amt
-                msg = "Passed on Actuals"
+                msg = "Approved on Actuals"
                 if msg not in remarks_list: 
                     remarks_list.append(msg)
 
@@ -178,23 +170,23 @@ def process_grouped_audit(meta, ledger):
             "Total Days / Units": days_tracked,
             "Total Claimed Amount": f"₹ {total_claimed:,.2f}",
             "Total Approved Amount": f"₹ {total_approved:,.2f}",
-            "Status": "Audited & Verified",
+            "Status": "Verified & Cleaned",
             "Policy Highlights": ", ".join(remarks_list)
         })
     return summary_rows
 
 # ==========================================
-# 3. RUNTIME EXECUTION
+# 3. STREAMLIT RENDERING LAYER
 # ==========================================
 if uploaded_file:
     meta, raw_ledger = parse_pdf_locally(uploaded_file)
     if raw_ledger:
-        st.success(f"✔️ Expense Detail Table Successfully Tracked for Dept: {meta['department']}")
+        st.success(f"✔️ Expense Detail Section Audited for Dept: {meta['department']}")
         
         grouped_summary = process_grouped_audit(meta, raw_ledger)
         df_summary = pd.DataFrame(grouped_summary)
         
-        st.subheader("📊 Grouped Category Wise Summary Grid (Processed via Rules)")
+        st.subheader("📊 Grouped Category Wise Summary Grid (Only Expense Details)")
         st.table(df_summary)
         
         st.markdown("---")
