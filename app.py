@@ -7,6 +7,11 @@ from datetime import datetime
 st.set_page_config(page_title="TIPL TE Auto-Audit Engine", layout="wide")
 st.title("🚀 TIPL TE Fully Automated Audit Portal")
 
+# ==========================================
+# 1. FILE UPLOADER - PLACED CRITICALLY AT TOP
+# ==========================================
+uploaded_file = st.file_uploader("📂 Upload Tour Claim PDF Here", type=["pdf"])
+
 DESIGNATION_LIMITS = {
     "TEAM LEAD / ENGINEER / SR. ENGINEER": {"Metros": {"lodging": 1050, "boarding": 485}, "State Capitals": {"lodging": 950, "boarding": 485}, "Other": {"lodging": 850, "boarding": 485}},
     "SR. EXECUTIVE / ASST. ENGINEER": {"Metros": {"lodging": 950, "boarding": 475}, "State Capitals": {"lodging": 850, "boarding": 450}, "Other": {"lodging": 750, "boarding": 450}}
@@ -19,14 +24,13 @@ def parse_pdf_locally(file):
             content = page.extract_text()
             if content: raw_text += content + "\n"
                 
-    # Defaults framework mapping
+    # Default parameters context framework
     start_date, start_time = "2026-04-20", "22:00:00"
     end_date, end_time = "2026-04-24", "06:00:00"
     department = "General"
     designation = "TEAM LEAD / ENGINEER / SR. ENGINEER"
     location_type = "Other"
     
-    # Auto detection from headers
     for line in raw_text.split("\n"):
         l_low = line.lower()
         if "service-dsic" in l_low:
@@ -78,28 +82,29 @@ def parse_pdf_locally(file):
 
         if expense_type:
             all_nums = re.findall(r'\b\d+(?:\.\d+)?\b', line_clean)
-            valid_tokens = [float(n) for n in all_nums if not re.match(r'^20\d{2}$', n) and float(n) >= 40]
+            valid_tokens = [n for n in all_nums if not re.match(r'^20\d{2}$', n)]
             
             if valid_tokens:
-                val = valid_tokens[-1]
-                if val in [2026.0, 3207.0, 3435.0, 3442.0, 3443.0]:
-                    continue
-                    
-                extracted_items.append({
-                    "Date": current_date,
-                    "Expense Type": expense_type,
-                    "Amount": val
-                })
+                try:
+                    val = float(valid_tokens[-1])
+                    if val in [2026.0, 3207.0, 3435.0, 3442.0, 3443.0]:
+                        continue
+                    extracted_items.append({
+                        "Date": current_date,
+                        "Expense Type": expense_type,
+                        "Amount": val
+                    })
+                except: pass
                 
     meta = {"start_date": start_date, "start_time": start_time, "end_date": end_date, "end_time": end_time, "department": department, "designation": designation, "location_type": location_type}
     return meta, extracted_items
 
 def calculate_boarding_factor(current_date, meta):
     """
-    Official TIPL Slab-wise matrix based on Departure & Arrival hours
+    Applies exact slab metrics depending on duration timestamps 
     """
     if current_date != meta["start_date"] and current_date != meta["end_date"]:
-        return 1.0, "Full Day (100%)"
+        return 1.0, "Middle Full Day (100%)"
 
     if current_date == meta["start_date"]:
         try:
@@ -130,7 +135,6 @@ def process_grouped_audit(meta, ledger):
     selected_desig = meta["designation"]
     general_rules = DESIGNATION_LIMITS.get(selected_desig, DESIGNATION_LIMITS["TEAM LEAD / ENGINEER / SR. ENGINEER"])[city_tier]
     
-    # Organize by category to group rows effectively
     grouped_data = {}
     for item in ledger:
         etype = item["Expense Type"]
@@ -139,34 +143,8 @@ def process_grouped_audit(meta, ledger):
         grouped_data[etype].append(item)
         
     summary_rows = []
-    
     for etype, records in grouped_data.items():
         total_claimed = sum(r["Amount"] for r in records)
         total_approved = 0.0
-        days_tracked = len(set(r["Date"] for r in records)) if etype != "Conveyance(Local)" else len(records)
-        remarks_list = []
-        
-        for r in records:
-            amt = r["Amount"]
-            date_str = r["Date"]
-            
-            if etype == "Boarding(Food)":
-                daily_limit = general_rules["boarding"]
-                factor, remark_tag = calculate_boarding_factor(date_str, meta)
-                allowed_max = daily_limit * factor
-                total_approved += min(amt, allowed_max)
-                if remark_tag not in remarks_list:
-                    remarks_list.append(remark_tag)
-                    
-            elif etype == "Lodging(Hotel)":
-                base_limit = 750.0 if meta["department"] == "Service-DSIC" else general_rules["lodging"]
-                total_approved += min(amt, base_limit)
-                msg = f"Capped at ₹{base_limit}/day"
-                if msg not in remarks_list: remarks_list.append(msg)
-                
-            elif etype == "Conveyance(Local)":
-                total_approved += amt
-                msg = "Approved on Actuals"
-                if msg not in remarks_list: remarks_list.append(msg)
-
-        summary_rows
+        # Unified Days Count calculator engine
+        days_tracked = len(set(r
