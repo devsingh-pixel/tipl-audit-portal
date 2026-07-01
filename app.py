@@ -4,11 +4,11 @@ import pdfplumber
 import re
 from datetime import datetime
 
-st.set_page_config(page_title="TIPL TE Auto-Audit Engine", layout="wide")
+st.set_page_config(page_title="TIPL Audit Portal", layout="wide")
 st.title("🚀 TIPL TE Fully Automated Audit Portal")
 
 # ==========================================
-# 1. FILE UPLOADER - AT THE TOP
+# 1. FILE UPLOADER AT THE VERY TOP
 # ==========================================
 uploaded_file = st.file_uploader("📂 Upload Tour Claim PDF Here", type=["pdf"])
 
@@ -74,7 +74,8 @@ def parse_pdf_locally(file):
     for line in raw_text.split("\n"):
         line_clean = line.strip().lower()
         
-        if not line_clean or any(x in line_clean for x in ["account code", "applied amount", "grand total", "total passed", "passed amount", "jv detail", "expense summary", "particulars/tour remark", "mode of travelling", "bill copy", "name of hotel"]):
+        # Trash filters short code
+        if not line_clean or any(x in line_clean for x in ["account", "applied", "grand", "total", "passed", "jv", "summary", "particulars", "travelling", "bill", "hotel"]):
             continue
 
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line_clean)
@@ -83,11 +84,11 @@ def parse_pdf_locally(file):
             
         expense_type = None
         if "boarding" in line_clean:
-            expense_type = "Boarding(Food)"
+            expense_type = "Boarding"
         elif "lodging" in line_clean:
-            expense_type = "Lodging(Hotel)"
+            expense_type = "Lodging"
         elif any(c in line_clean for c in ["conveyance", "taxi", "auto", "coriveyance"]):
-            expense_type = "Conveyance(Local)"
+            expense_type = "Conveyance"
 
         if expense_type:
             all_nums = re.findall(r'\b\d+(?:\.\d+)?\b', line_clean)
@@ -111,33 +112,33 @@ def parse_pdf_locally(file):
 
 def calculate_boarding_factor(current_date, meta):
     if current_date != meta["start_date"] and current_date != meta["end_date"]:
-        return 1.0, "Middle Full Day (100%)"
+        return 1.0, "Mid-Day(100%)"
 
     if current_date == meta["start_date"]:
         try:
             shour = int(meta["start_time"].split(":")[0])
             if shour < 12:
-                return 1.0, "Start Day (<12PM:100%)"
+                return 1.0, "Start(<12PM:100%)"
             elif 12 <= shour < 18:
-                return 0.70, "Start Day (12-6PM:70%)"
+                return 0.70, "Start(12-6PM:70%)"
             else:
-                return 0.30, "Start Day (>6PM:30%)"
+                return 0.30, "Start(>6PM:30%)"
         except: 
-            return 1.0, "Full Day (100%)"
+            return 1.0, "Day(100%)"
 
     if current_date == meta["end_date"]:
         try:
             ehour = int(meta["end_time"].split(":")[0])
             if ehour < 12:
-                return 0.30, "End Day (<12PM:30%)"
+                return 0.30, "End(<12PM:30%)"
             elif 12 <= ehour < 18:
-                return 0.70, "End Day (12-6PM:70%)"
+                return 0.70, "End(12-6PM:70%)"
             else:
-                return 1.0, "End Day (>6PM:100%)"
+                return 1.0, "End(>6PM:100%)"
         except: 
-            return 1.0, "Full Day (100%)"
+            return 1.0, "Day(100%)"
         
-    return 1.0, "Full Day (100%)"
+    return 1.0, "Day(100%)"
 
 def process_grouped_audit(meta, ledger):
     city_tier = meta["location_type"]
@@ -157,7 +158,7 @@ def process_grouped_audit(meta, ledger):
         total_approved = 0.0
         
         unique_dates = set([r["Date"] for r in records])
-        if etype != "Conveyance(Local)":
+        if etype != "Conveyance":
             days_tracked = len(unique_dates)
         else:
             days_tracked = len(records)
@@ -168,7 +169,7 @@ def process_grouped_audit(meta, ledger):
             amt = r["Amount"]
             date_str = r["Date"]
             
-            if etype == "Boarding(Food)":
+            if etype == "Boarding":
                 daily_limit = general_rules["boarding"]
                 factor, remark_tag = calculate_boarding_factor(date_str, meta)
                 allowed_max = daily_limit * factor
@@ -176,13 +177,49 @@ def process_grouped_audit(meta, ledger):
                 if remark_tag not in remarks_list:
                     remarks_list.append(remark_tag)
                     
-            elif etype == "Lodging(Hotel)":
+            elif etype == "Lodging":
                 base_limit = 750.0 if meta["department"] == "Service-DSIC" else general_rules["lodging"]
                 total_approved += min(amt, base_limit)
-                msg = f"Capped at ₹{base_limit}/day"
+                msg = "Hotel Capped"
                 if msg not in remarks_list: 
                     remarks_list.append(msg)
                 
-            elif etype == "Conveyance(Local)":
+            elif etype == "Conveyance":
                 total_approved += amt
-                msg = "Approved
+                msg = "Actuals"
+                if msg not in remarks_list: 
+                    remarks_list.append(msg)
+
+        summary_rows.append({
+            "Expense Type": etype,
+            "Total Days / Units": days_tracked,
+            "Total Claimed Amount": f"₹ {total_claimed:,.2f}",
+            "Total Approved Amount": f"₹ {total_approved:,.2f}",
+            "Status": "Verified",
+            "Policy Highlights": ", ".join(remarks_list)
+        })
+    return summary_rows
+
+# ==========================================
+# 3. APP EXECUTION TRIGGER
+# ==========================================
+if uploaded_file:
+    meta, raw_ledger = parse_pdf_locally(uploaded_file)
+    if raw_ledger:
+        st.success(f"✔️ Tour Period Parsed: {meta['start_date']} to {meta['end_date']}")
+        
+        grouped_summary = process_grouped_audit(meta, raw_ledger)
+        df_summary = pd.DataFrame(grouped_summary)
+        
+        st.subheader("📊 Grouped Category Wise Summary Grid")
+        st.table(df_summary)
+        
+        st.markdown("---")
+        st.subheader("🏁 Final Tour Total Calculation")
+        
+        claim_sum = sum(float(x.replace("₹", "").replace(",", "").strip()) for x in df_summary["Total Claimed Amount"])
+        approve_sum = sum(float(x.replace("₹", "").replace(",", "").strip()) for x in df_summary["Total Approved Amount"])
+        
+        col1, col2 = st.columns(2)
+        col1.metric("📌 Total Claimed", f"₹ {claim_sum:,.2f}")
+        col2.metric("✅ Total Approved", f"₹ {approve_sum:,.2f}")
