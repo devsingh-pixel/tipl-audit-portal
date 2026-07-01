@@ -8,13 +8,21 @@ st.set_page_config(page_title="TIPL TE Auto-Audit Engine", layout="wide")
 st.title("🚀 TIPL TE Fully Automated Audit Portal")
 
 # ==========================================
-# 1. FILE UPLOADER - PLACED CRITICALLY AT TOP
+# 1. FILE UPLOADER - AT THE TOP
 # ==========================================
 uploaded_file = st.file_uploader("📂 Upload Tour Claim PDF Here", type=["pdf"])
 
 DESIGNATION_LIMITS = {
-    "TEAM LEAD / ENGINEER / SR. ENGINEER": {"Metros": {"lodging": 1050, "boarding": 485}, "State Capitals": {"lodging": 950, "boarding": 485}, "Other": {"lodging": 850, "boarding": 485}},
-    "SR. EXECUTIVE / ASST. ENGINEER": {"Metros": {"lodging": 950, "boarding": 475}, "State Capitals": {"lodging": 850, "boarding": 450}, "Other": {"lodging": 750, "boarding": 450}}
+    "TEAM LEAD / ENGINEER / SR. ENGINEER": {
+        "Metros": {"lodging": 1050, "boarding": 485},
+        "State Capitals": {"lodging": 950, "boarding": 485},
+        "Other": {"lodging": 850, "boarding": 485}
+    },
+    "SR. EXECUTIVE / ASST. ENGINEER": {
+        "Metros": {"lodging": 950, "boarding": 475},
+        "State Capitals": {"lodging": 850, "boarding": 450},
+        "Other": {"lodging": 750, "boarding": 450}
+    }
 }
 
 def parse_pdf_locally(file):
@@ -22,7 +30,8 @@ def parse_pdf_locally(file):
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
             content = page.extract_text()
-            if content: raw_text += content + "\n"
+            if content: 
+                raw_text += content + "\n"
                 
     # Default parameters context framework
     start_date, start_time = "2026-04-20", "22:00:00"
@@ -48,7 +57,8 @@ def parse_pdf_locally(file):
                 try:
                     start_date = datetime.strptime(start_find.group(1), "%d/%m/%Y").strftime("%Y-%m-%d")
                     start_time = start_find.group(2)
-                except: pass
+                except: 
+                    pass
                 
         if "end date:" in l_low:
             end_find = re.search(r'end date:\s*.*?(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})', l_low)
@@ -56,7 +66,8 @@ def parse_pdf_locally(file):
                 try:
                     end_date = datetime.strptime(end_find.group(1), "%d/%m/%Y").strftime("%Y-%m-%d")
                     end_time = end_find.group(2)
-                except: pass
+                except: 
+                    pass
 
     extracted_items = []
     current_date = start_date 
@@ -94,15 +105,13 @@ def parse_pdf_locally(file):
                         "Expense Type": expense_type,
                         "Amount": val
                     })
-                except: pass
+                except: 
+                    pass
                 
     meta = {"start_date": start_date, "start_time": start_time, "end_date": end_date, "end_time": end_time, "department": department, "designation": designation, "location_type": location_type}
     return meta, extracted_items
 
 def calculate_boarding_factor(current_date, meta):
-    """
-    Applies exact slab metrics depending on duration timestamps 
-    """
     if current_date != meta["start_date"] and current_date != meta["end_date"]:
         return 1.0, "Middle Full Day (100%)"
 
@@ -115,7 +124,8 @@ def calculate_boarding_factor(current_date, meta):
                 return 0.70, "Start Day (12-6 PM: 70%)"
             else:
                 return 0.30, "Start Day (>6 PM: 30%)"
-        except: return 1.0, "Full Day (100%)"
+        except: 
+            return 1.0, "Full Day (100%)"
 
     if current_date == meta["end_date"]:
         try:
@@ -123,28 +133,4 @@ def calculate_boarding_factor(current_date, meta):
             if ehour < 12:
                 return 0.30, "End Day (<12 PM: 30%)"
             elif 12 <= ehour < 18:
-                return 0.70, "End Day (12-6 PM: 70%)"
-            else:
-                return 1.0, "End Day (>6 PM: 100%)"
-        except: return 1.0, "Full Day (100%)"
-        
-    return 1.0, "Full Day (100%)"
-
-def process_grouped_audit(meta, ledger):
-    city_tier = meta["location_type"]
-    selected_desig = meta["designation"]
-    general_rules = DESIGNATION_LIMITS.get(selected_desig, DESIGNATION_LIMITS["TEAM LEAD / ENGINEER / SR. ENGINEER"])[city_tier]
-    
-    grouped_data = {}
-    for item in ledger:
-        etype = item["Expense Type"]
-        if etype not in grouped_data:
-            grouped_data[etype] = []
-        grouped_data[etype].append(item)
-        
-    summary_rows = []
-    for etype, records in grouped_data.items():
-        total_claimed = sum(r["Amount"] for r in records)
-        total_approved = 0.0
-        # Unified Days Count calculator engine
-        days_tracked = len(set(r
+                return 0.70, "End Day (12-
