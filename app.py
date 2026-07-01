@@ -33,7 +33,6 @@ def parse_pdf_locally(file):
             if content: 
                 raw_text += content + "\n"
                 
-    # Default parameters context framework
     start_date, start_time = "2026-04-20", "22:00:00"
     end_date, end_time = "2026-04-24", "06:00:00"
     department = "General"
@@ -50,21 +49,21 @@ def parse_pdf_locally(file):
             designation = "TEAM LEAD / ENGINEER / SR. ENGINEER"
             
         if "start date:" in l_low or "tour no." in l_low:
-            start_find = re.search(r'start date:\s*.*?(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})', l_low)
-            if not start_find:
-                start_find = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})', line)
+            start_find = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})', line)
             if start_find:
                 try:
-                    start_date = datetime.strptime(start_find.group(1), "%d/%m/%Y").strftime("%Y-%m-%d")
+                    dt_obj = datetime.strptime(start_find.group(1), "%d/%m/%Y")
+                    start_date = dt_obj.strftime("%Y-%m-%d")
                     start_time = start_find.group(2)
                 except: 
                     pass
                 
         if "end date:" in l_low:
-            end_find = re.search(r'end date:\s*.*?(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})', l_low)
+            end_find = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})', line)
             if end_find:
                 try:
-                    end_date = datetime.strptime(end_find.group(1), "%d/%m/%Y").strftime("%Y-%m-%d")
+                    dt_obj = datetime.strptime(end_find.group(1), "%d/%m/%Y")
+                    end_date = dt_obj.strftime("%Y-%m-%d")
                     end_time = end_find.group(2)
                 except: 
                     pass
@@ -72,8 +71,7 @@ def parse_pdf_locally(file):
     extracted_items = []
     current_date = start_date 
 
-    lines = raw_text.split("\n")
-    for line in lines:
+    for line in raw_text.split("\n"):
         line_clean = line.strip().lower()
         
         if not line_clean or any(x in line_clean for x in ["account code", "applied amount", "grand total", "total passed", "passed amount", "jv detail", "expense summary", "particulars/tour remark", "mode of travelling", "bill copy", "name of hotel"]):
@@ -119,11 +117,11 @@ def calculate_boarding_factor(current_date, meta):
         try:
             shour = int(meta["start_time"].split(":")[0])
             if shour < 12:
-                return 1.0, "Start Day (<12 PM: 100%)"
+                return 1.0, "Start Day (<12PM:100%)"
             elif 12 <= shour < 18:
-                return 0.70, "Start Day (12-6 PM: 70%)"
+                return 0.70, "Start Day (12-6PM:70%)"
             else:
-                return 0.30, "Start Day (>6 PM: 30%)"
+                return 0.30, "Start Day (>6PM:30%)"
         except: 
             return 1.0, "Full Day (100%)"
 
@@ -131,6 +129,60 @@ def calculate_boarding_factor(current_date, meta):
         try:
             ehour = int(meta["end_time"].split(":")[0])
             if ehour < 12:
-                return 0.30, "End Day (<12 PM: 30%)"
+                return 0.30, "End Day (<12PM:30%)"
             elif 12 <= ehour < 18:
-                return 0.70, "End Day (12-
+                return 0.70, "End Day (12-6PM:70%)"
+            else:
+                return 1.0, "End Day (>6PM:100%)"
+        except: 
+            return 1.0, "Full Day (100%)"
+        
+    return 1.0, "Full Day (100%)"
+
+def process_grouped_audit(meta, ledger):
+    city_tier = meta["location_type"]
+    selected_desig = meta["designation"]
+    general_rules = DESIGNATION_LIMITS.get(selected_desig, DESIGNATION_LIMITS["TEAM LEAD / ENGINEER / SR. ENGINEER"])[city_tier]
+    
+    grouped_data = {}
+    for item in ledger:
+        etype = item["Expense Type"]
+        if etype not in grouped_data:
+            grouped_data[etype] = []
+        grouped_data[etype].append(item)
+        
+    summary_rows = []
+    for etype, records in grouped_data.items():
+        total_claimed = sum(r["Amount"] for r in records)
+        total_approved = 0.0
+        
+        unique_dates = set([r["Date"] for r in records])
+        if etype != "Conveyance(Local)":
+            days_tracked = len(unique_dates)
+        else:
+            days_tracked = len(records)
+            
+        remarks_list = []
+        
+        for r in records:
+            amt = r["Amount"]
+            date_str = r["Date"]
+            
+            if etype == "Boarding(Food)":
+                daily_limit = general_rules["boarding"]
+                factor, remark_tag = calculate_boarding_factor(date_str, meta)
+                allowed_max = daily_limit * factor
+                total_approved += min(amt, allowed_max)
+                if remark_tag not in remarks_list:
+                    remarks_list.append(remark_tag)
+                    
+            elif etype == "Lodging(Hotel)":
+                base_limit = 750.0 if meta["department"] == "Service-DSIC" else general_rules["lodging"]
+                total_approved += min(amt, base_limit)
+                msg = f"Capped at ₹{base_limit}/day"
+                if msg not in remarks_list: 
+                    remarks_list.append(msg)
+                
+            elif etype == "Conveyance(Local)":
+                total_approved += amt
+                msg = "Approved
