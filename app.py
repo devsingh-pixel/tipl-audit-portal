@@ -8,7 +8,7 @@ st.set_page_config(page_title="TIPL Audit Portal", layout="wide")
 st.title("🚀 TIPL TE Fully Automated Audit Portal")
 
 # ==========================================
-# 1. FILE UPLOADER AT THE VERY TOP
+# 1. FILE UPLOADER AT THE TOP
 # ==========================================
 uploaded_file = st.file_uploader("📂 Upload Tour Claim PDF Here", type=["pdf"])
 
@@ -39,6 +39,7 @@ def parse_pdf_locally(file):
     designation = "TEAM LEAD / ENGINEER / SR. ENGINEER"
     location_type = "Other"
     
+    # Header detection
     for line in raw_text.split("\n"):
         l_low = line.lower()
         if "service-dsic" in l_low:
@@ -55,8 +56,7 @@ def parse_pdf_locally(file):
                     dt_obj = datetime.strptime(start_find.group(1), "%d/%m/%Y")
                     start_date = dt_obj.strftime("%Y-%m-%d")
                     start_time = start_find.group(2)
-                except: 
-                    pass
+                except: pass
                 
         if "end date:" in l_low:
             end_find = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})', line)
@@ -65,8 +65,7 @@ def parse_pdf_locally(file):
                     dt_obj = datetime.strptime(end_find.group(1), "%d/%m/%Y")
                     end_date = dt_obj.strftime("%Y-%m-%d")
                     end_time = end_find.group(2)
-                except: 
-                    pass
+                except: pass
 
     extracted_items = []
     current_date = start_date 
@@ -74,8 +73,8 @@ def parse_pdf_locally(file):
     for line in raw_text.split("\n"):
         line_clean = line.strip().lower()
         
-        # Trash filters short code
-        if not line_clean or any(x in line_clean for x in ["account", "applied", "grand", "total", "passed", "jv", "summary", "particulars", "travelling", "bill", "hotel"]):
+        # FIXED: Removed strict filters like travel/ticket so all expenses are caught
+        if not line_clean or any(x in line_clean for x in ["account code", "applied amount", "grand total", "total passed", "passed amount", "jv detail", "expense summary", "particulars/tour remark", "mode of travelling"]):
             continue
 
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line_clean)
@@ -87,6 +86,8 @@ def parse_pdf_locally(file):
             expense_type = "Boarding"
         elif "lodging" in line_clean:
             expense_type = "Lodging"
+        elif "travel" in line_clean or "ticket" in line_clean:
+            expense_type = "Travel Ticket"
         elif any(c in line_clean for c in ["conveyance", "taxi", "auto", "coriveyance"]):
             expense_type = "Conveyance"
 
@@ -97,15 +98,15 @@ def parse_pdf_locally(file):
             if valid_tokens:
                 try:
                     val = float(valid_tokens[-1])
-                    if val in [2026.0, 3207.0, 3435.0, 3442.0, 3443.0]:
+                    # Skip specific master data document counters
+                    if val in [3207.0, 3435.0, 3442.0, 3443.0]:
                         continue
                     extracted_items.append({
                         "Date": current_date,
                         "Expense Type": expense_type,
                         "Amount": val
                     })
-                except: 
-                    pass
+                except: pass
                 
     meta = {"start_date": start_date, "start_time": start_time, "end_date": end_date, "end_time": end_time, "department": department, "designation": designation, "location_type": location_type}
     return meta, extracted_items
@@ -117,26 +118,18 @@ def calculate_boarding_factor(current_date, meta):
     if current_date == meta["start_date"]:
         try:
             shour = int(meta["start_time"].split(":")[0])
-            if shour < 12:
-                return 1.0, "Start(<12PM:100%)"
-            elif 12 <= shour < 18:
-                return 0.70, "Start(12-6PM:70%)"
-            else:
-                return 0.30, "Start(>6PM:30%)"
-        except: 
-            return 1.0, "Day(100%)"
+            if shour < 12: return 1.0, "Start(<12PM:100%)"
+            elif 12 <= shour < 18: return 0.70, "Start(12-6PM:70%)"
+            else: return 0.30, "Start(>6PM:30%)"
+        except: return 1.0, "Day(100%)"
 
     if current_date == meta["end_date"]:
         try:
             ehour = int(meta["end_time"].split(":")[0])
-            if ehour < 12:
-                return 0.30, "End(<12PM:30%)"
-            elif 12 <= ehour < 18:
-                return 0.70, "End(12-6PM:70%)"
-            else:
-                return 1.0, "End(>6PM:100%)"
-        except: 
-            return 1.0, "Day(100%)"
+            if ehour < 12: return 0.30, "End(<12PM:30%)"
+            elif 12 <= ehour < 18: return 0.70, "End(12-6PM:70%)"
+            else: return 1.0, "End(>6PM:100%)"
+        except: return 1.0, "Day(100%)"
         
     return 1.0, "Day(100%)"
 
@@ -158,68 +151,9 @@ def process_grouped_audit(meta, ledger):
         total_approved = 0.0
         
         unique_dates = set([r["Date"] for r in records])
-        if etype != "Conveyance":
+        if etype in ["Boarding", "Lodging"]:
             days_tracked = len(unique_dates)
         else:
             days_tracked = len(records)
             
-        remarks_list = []
-        
-        for r in records:
-            amt = r["Amount"]
-            date_str = r["Date"]
-            
-            if etype == "Boarding":
-                daily_limit = general_rules["boarding"]
-                factor, remark_tag = calculate_boarding_factor(date_str, meta)
-                allowed_max = daily_limit * factor
-                total_approved += min(amt, allowed_max)
-                if remark_tag not in remarks_list:
-                    remarks_list.append(remark_tag)
-                    
-            elif etype == "Lodging":
-                base_limit = 750.0 if meta["department"] == "Service-DSIC" else general_rules["lodging"]
-                total_approved += min(amt, base_limit)
-                msg = "Hotel Capped"
-                if msg not in remarks_list: 
-                    remarks_list.append(msg)
-                
-            elif etype == "Conveyance":
-                total_approved += amt
-                msg = "Actuals"
-                if msg not in remarks_list: 
-                    remarks_list.append(msg)
-
-        summary_rows.append({
-            "Expense Type": etype,
-            "Total Days / Units": days_tracked,
-            "Total Claimed Amount": f"₹ {total_claimed:,.2f}",
-            "Total Approved Amount": f"₹ {total_approved:,.2f}",
-            "Status": "Verified",
-            "Policy Highlights": ", ".join(remarks_list)
-        })
-    return summary_rows
-
-# ==========================================
-# 3. APP EXECUTION TRIGGER
-# ==========================================
-if uploaded_file:
-    meta, raw_ledger = parse_pdf_locally(uploaded_file)
-    if raw_ledger:
-        st.success(f"✔️ Tour Period Parsed: {meta['start_date']} to {meta['end_date']}")
-        
-        grouped_summary = process_grouped_audit(meta, raw_ledger)
-        df_summary = pd.DataFrame(grouped_summary)
-        
-        st.subheader("📊 Grouped Category Wise Summary Grid")
-        st.table(df_summary)
-        
-        st.markdown("---")
-        st.subheader("🏁 Final Tour Total Calculation")
-        
-        claim_sum = sum(float(x.replace("₹", "").replace(",", "").strip()) for x in df_summary["Total Claimed Amount"])
-        approve_sum = sum(float(x.replace("₹", "").replace(",", "").strip()) for x in df_summary["Total Approved Amount"])
-        
-        col1, col2 = st.columns(2)
-        col1.metric("📌 Total Claimed", f"₹ {claim_sum:,.2f}")
-        col2.metric("✅ Total Approved", f"₹ {approve_sum:,.2f}")
+        remarks_list
