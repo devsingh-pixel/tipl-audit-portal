@@ -85,6 +85,14 @@ SLAB_TABLE = [
 
 METRO_CITIES = ["Mumbai", "Kolkata", "Chennai", "Delhi", "NCR", "Bangalore", "Bengaluru", "Hyderabad"]
 
+STATE_CAPITALS = [
+    "Jaipur", "Lucknow", "Bhopal", "Patna", "Bhubaneswar", "Raipur", "Ranchi",
+    "Dehradun", "Shimla", "Chandigarh", "Gandhinagar", "Panaji", "Panjim",
+    "Thiruvananthapuram", "Trivandrum", "Amaravati", "Imphal", "Shillong",
+    "Aizawl", "Kohima", "Itanagar", "Gangtok", "Jammu", "Srinagar",
+    "Bengaluru", "Bangalore", "Guwahati", "Dispur", "Puducherry",
+]
+
 CATEGORY_KEYWORDS = {
     "Boarding(Food)": ["boarding", "food"],
     "Lodging(Hotel)": ["lodging", "hotel"],
@@ -102,8 +110,12 @@ HEADER_DATE_FMT = "%d/%m/%Y %H:%M:%S"
 # ----------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Audit Settings")
-    place_category = st.selectbox("Place Category for this Tour", ["Other", "State Capital", "Metro"], index=0)
+    st.caption("Place Category (Metro / State Capital / Other) is auto-detected from the tour's Place names after upload.")
     st.caption("Metros: " + ", ".join(METRO_CITIES))
+    manual_place_override = st.checkbox("Manually override Place Category", value=False)
+    manual_place_category = None
+    if manual_place_override:
+        manual_place_category = st.selectbox("Place Category for this Tour", ["Other", "State Capital", "Metro"], index=0)
     st.markdown("---")
     manual_category_override = st.checkbox("Manually select Designation Slab", value=False)
     manual_category = None
@@ -128,11 +140,21 @@ with st.sidebar:
 # HELPERS
 # ----------------------------------------------------------------------
 def classify_line(text_lower):
+    """Classify by the EARLIEST-occurring category keyword in the text.
+    This matters because free-text remarks can contain a rival keyword later
+    in the string (e.g. a Conveyance remark 'Hotel to BSP Plant' contains the
+    word 'hotel' - but the real Expense Type keyword 'conveyance' always sits
+    at the very start of the row, before any remark text, so earliest-position
+    wins rather than a fixed Boarding->Lodging->Conveyance->Ticket scan order)."""
+    best_pos = None
+    best_bucket = None
     for bucket, keywords in CATEGORY_KEYWORDS.items():
         for kw in keywords:
-            if kw in text_lower:
-                return bucket
-    return None
+            idx = text_lower.find(kw)
+            if idx != -1 and (best_pos is None or idx < best_pos):
+                best_pos = idx
+                best_bucket = bucket
+    return best_bucket
 
 
 def match_designation_slab(designation_text):
@@ -149,6 +171,24 @@ def match_designation_slab(designation_text):
         if re.search(r"\b" + re.escape(kw) + r"\b", designation_lower):
             return slab
     return None
+
+
+def auto_detect_place_category(place_names, header_text):
+    """Check the tour's place names (line items + header 'Place Visited' text)
+    against the Metro / State Capital reference lists. Metro takes priority
+    over State Capital if both appear; defaults to 'Other' if nothing matches."""
+    combined_text = " ".join([p for p in place_names if p]) + " " + (header_text or "")
+    combined_lower = combined_text.lower()
+
+    matched_metro = [city for city in METRO_CITIES if re.search(r"\b" + re.escape(city.lower()) + r"\b", combined_lower)]
+    if matched_metro:
+        return "Metro", matched_metro
+
+    matched_capital = [city for city in STATE_CAPITALS if re.search(r"\b" + re.escape(city.lower()) + r"\b", combined_lower)]
+    if matched_capital:
+        return "State Capital", matched_capital
+
+    return "Other", []
 
 
 def parse_header_info(full_text):
@@ -223,11 +263,17 @@ def parse_expense_row(row):
     if bucket is None:
         return None
 
+    # Amount must be a STANDALONE cell that is fully a currency-decimal token
+    # (e.g. "2100.00"). A plain substring search is unsafe: bill attachment
+    # filenames like "..._22.11.48_1_...jpeg" also contain a \d+\.\d{2}-shaped
+    # fragment ("22.11") that would otherwise be picked up as the amount.
+    # Requiring the ENTIRE cell to match rules that out, since filenames
+    # always carry extra letters/underscores/extensions.
     amount = None
     for c in reversed(cells):
-        m = AMOUNT_PATTERN.search(c)
-        if m:
-            amount = float(m.group(0))
+        c_clean = c.replace("\n", "").strip()
+        if AMOUNT_PATTERN.fullmatch(c_clean):
+            amount = float(c_clean)
             break
     if amount is None:
         return None
@@ -276,7 +322,7 @@ def parse_jv_row(row):
         return None
     if not cells[0].isdigit() or not cells[1].isdigit():
         return None
-    if not AMOUNT_PATTERN.match(cells[-1]) or not AMOUNT_PATTERN.match(cells[-2]):
+    if not AMOUNT_PATTERN.fullmatch(cells[-1]) or not AMOUNT_PATTERN.fullmatch(cells[-2]):
         return None
     expense_type_raw = cells[2]
     bucket = classify_line(expense_type_raw.lower())
@@ -299,6 +345,7 @@ def parse_tr_pdf(file_bytes):
                 all_rows.extend(table)
 
     header_info = parse_header_info(full_text)
+    header_info["_full_text"] = full_text
 
     expense_rows = []
     for row in all_rows:
@@ -477,6 +524,20 @@ else:
 if slab is None:
     st.error("Could not auto-match this Designation to a TE Rules slab. Please tick 'Manually select Designation Slab' in the sidebar.")
     st.stop()
+
+# ---------------------- Place Category auto-detection ----------------------
+detected_place_category, matched_place_names = auto_detect_place_category(
+    expense_df["Place"].dropna().unique().tolist(), header_info.get("_full_text")
+)
+if manual_place_override and manual_place_category:
+    place_category = manual_place_category
+    st.caption(f"📍 Place Category manually set to **{place_category}** (auto-detection suggested **{detected_place_category}**).")
+else:
+    place_category = detected_place_category
+    if matched_place_names:
+        st.caption(f"📍 Place Category auto-detected as **{place_category}** (matched: {', '.join(matched_place_names)}).")
+    else:
+        st.caption(f"📍 Place Category auto-detected as **{place_category}** (no Metro/State Capital name found among tour places — default applied).")
 
 lodging_cap, boarding_cap = slab["caps"][place_category]
 st.success(
