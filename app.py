@@ -1,11 +1,17 @@
 """
 TIPL Travel Expense Auto-Audit Engine
 --------------------------------------
-A Streamlit application that parses TIPL travel expense PDF statements,
-strictly isolates the "Expense Detail" section (skipping the "JV Detail"
-summary block and any structural/reference numbers), extracts only valid
-transaction line items, applies TIPL travel policy caps, and produces a
-clean audit summary comparing Claimed vs Approved amounts.
+Upload a TIPL Tour Expense (TR) PDF and this app will:
+  1. Read the tour header (Employee, Designation, Tour Start/End date-time, Days).
+  2. Strictly parse ONLY the "Expenses Detail" line-item table (never the JV Detail
+     summary block), using PDF table structure so distances/rates/reference numbers
+     are never mistaken for claim amounts.
+  3. Map the employee's Designation to the correct TIPL TE Rules (w.e.f. 1-Apr-2025)
+     slab, apply the Lodging/Boarding daily caps for the selected Place Category.
+  4. Validate every line item's date against the tour's Start/End date boundary.
+  5. Apply Boarding check-in/out day factors and Lodging night-count checks.
+  6. Reconcile the computed totals against the PDF's own JV Detail summary.
+  7. Present an easy-to-scan audit summary with a plain-language verdict.
 
 Run with:  streamlit run app.py
 """
@@ -26,325 +32,409 @@ except ImportError:
 # ----------------------------------------------------------------------
 # PAGE CONFIG
 # ----------------------------------------------------------------------
-st.set_page_config(
-    page_title="TIPL Travel Expense Auto-Audit Engine",
-    page_icon="🧾",
-    layout="wide",
-)
+st.set_page_config(page_title="TIPL Travel Expense Auto-Audit Engine", page_icon="🧾", layout="wide")
 
-
-# ----------------------------------------------------------------------
-# FILE UPLOADER — MUST BE AT THE VERY TOP OF THE INTERFACE
-# ----------------------------------------------------------------------
 st.title("🧾 TIPL Travel Expense Auto-Audit Engine")
-st.caption("Upload a travel expense statement PDF to auto-parse, validate, and audit against TIPL policy caps.")
+st.caption("Upload a Tour Expense (TR) PDF. TE Rules w.e.f. 1-Apr-2025 are built in — no need to upload the policy document each time.")
 
-uploaded_file = st.file_uploader("Upload Expense Statement (PDF)", type=["pdf"])
+
+# ----------------------------------------------------------------------
+# FILE UPLOADER — VERY TOP OF THE INTERFACE
+# ----------------------------------------------------------------------
+uploaded_file = st.file_uploader("Upload Tour Expense (TR) PDF", type=["pdf"])
 
 st.divider()
 
 
 # ----------------------------------------------------------------------
-# CONSTANTS / POLICY CONFIG
+# HARD-CODED POLICY TABLE — TIPL TE Rules w.e.f. 1st April 2025
 # ----------------------------------------------------------------------
+# caps = {"Metro": (lodging, boarding), "State Capital": (lodging, boarding), "Other": (lodging, boarding)}
+SLAB_TABLE = [
+    {"category": 1, "name": "Workmen", "keywords": ["workmen", "workman"],
+     "caps": {"Metro": (550, 330), "State Capital": (500, 305), "Other": (450, 305)}},
+    {"category": 2, "name": "Trainees / Jr. Executive / Executive / Jr. Tech. Asst. / Tech. Asst. / Jr. Engineer",
+     "keywords": ["trainee", "junior executive", "jr. tech. assistant", "jr tech assistant",
+                  "tech. assistant", "tech assistant", "jr engineer", "jr. engineer", "junior engineer"],
+     "caps": {"Metro": (900, 415), "State Capital": (800, 390), "Other": (700, 390)}},
+    {"category": 3, "name": "Sr. Executive / Asst. Team Lead / Asst. Engineer",
+     "keywords": ["sr. executive", "senior executive", "asst. team lead", "assistant team lead",
+                  "asst. engineer", "assistant engineer"],
+     "caps": {"Metro": (950, 475), "State Capital": (850, 450), "Other": (750, 450)}},
+    {"category": 4, "name": "Team Lead / Sr. Team Lead / Engineer / Sr. Engineer",
+     "keywords": ["sr. team lead", "senior team lead", "team lead", "sr. engineer",
+                  "senior engineer", "engineer"],
+     "caps": {"Metro": (1050, 510), "State Capital": (950, 485), "Other": (850, 485)}},
+    {"category": 5, "name": "Asst. Managers / Deputy Managers",
+     "keywords": ["asst. manager", "assistant manager", "deputy manager"],
+     "caps": {"Metro": (1200, 550), "State Capital": (1100, 525), "Other": (1000, 525)}},
+    {"category": 6, "name": "Managers / Sr. Managers",
+     "keywords": ["sr. manager", "senior manager", "manager"],
+     "caps": {"Metro": (1350, 600), "State Capital": (1250, 575), "Other": (1150, 575)}},
+    {"category": 7, "name": "AGM", "keywords": ["agm", "assistant general manager"],
+     "caps": {"Metro": (1500, 700), "State Capital": (1400, 675), "Other": (1300, 675)}},
+    {"category": 8, "name": "DGM", "keywords": ["dgm", "deputy general manager"],
+     "caps": {"Metro": (1600, 725), "State Capital": (1500, 700), "Other": (1400, 700)}},
+    {"category": 9, "name": "GM", "keywords": ["gm", "general manager"],
+     "caps": {"Metro": (1700, 850), "State Capital": (1600, 825), "Other": (1500, 825)}},
+    {"category": 10, "name": "Sr. GM & above", "keywords": ["sr. gm", "senior general manager"],
+     "caps": {"Metro": (1800, 900), "State Capital": (1700, 875), "Other": (1600, 875)}},
+    {"category": 11, "name": "Directors", "keywords": ["director"],
+     "caps": {"Metro": ("Actuals", "Actuals"), "State Capital": ("Actuals", "Actuals"), "Other": ("Actuals", "Actuals")}},
+]
+
+METRO_CITIES = ["Mumbai", "Kolkata", "Chennai", "Delhi", "NCR", "Bangalore", "Bengaluru", "Hyderabad"]
+
 CATEGORY_KEYWORDS = {
     "Boarding(Food)": ["boarding", "food"],
     "Lodging(Hotel)": ["lodging", "hotel"],
     "Conveyance(Local)": ["conveyance", "taxi", "auto"],
-    "Travel Ticket": ["travel", "ticket", "train", "rail"],
+    "Travel Ticket": ["travel ticket", "ticket", "train", "rail"],
 }
 
-SECTION_START_KEYWORD = "expense detail"
-
 AMOUNT_PATTERN = re.compile(r"\d+\.\d{2}")
-DATE_PATTERN = re.compile(
-    r"\b(\d{1,2}[-/][A-Za-z]{3,9}[-/]\d{2,4}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b"
-)
-TIME_PATTERN = re.compile(r"\b(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?\b")
-
-DATE_FORMATS = ["%d-%b-%Y", "%d-%b-%y", "%d/%b/%Y", "%d/%b/%y", "%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y"]
+DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
+HEADER_DATE_FMT = "%d/%m/%Y %H:%M:%S"
 
 
 # ----------------------------------------------------------------------
-# SIDEBAR — EDITABLE POLICY PARAMETERS
+# SIDEBAR — POLICY REFERENCE + OVERRIDES
 # ----------------------------------------------------------------------
 with st.sidebar:
-    st.header("⚙️ Policy Parameters")
-    employee_category = st.selectbox("Employee Category", ["Sr. Engineer (Other Category)"], index=0)
-    boarding_daily_cap = st.number_input("Boarding(Food) Daily Cap (₹)", min_value=0.0, value=485.0, step=5.0)
-    lodging_daily_cap = st.number_input("Lodging(Hotel) Daily Cap (₹)", min_value=0.0, value=850.0, step=10.0)
+    st.header("⚙️ Audit Settings")
+    place_category = st.selectbox("Place Category for this Tour", ["Other", "State Capital", "Metro"], index=0)
+    st.caption("Metros: " + ", ".join(METRO_CITIES))
     st.markdown("---")
-    st.markdown("**Check-in/out Factors**")
-    st.caption("Start day check-in after 6 PM → 30% of cap")
-    st.caption("End day check-out before 12 PM → 30% of cap")
-    st.caption("All middle days → 100% of cap")
+    manual_category_override = st.checkbox("Manually select Designation Slab", value=False)
+    manual_category = None
+    if manual_category_override:
+        manual_category = st.selectbox(
+            "Designation Category",
+            [f"Category {s['category']}: {s['name']}" for s in SLAB_TABLE],
+        )
+    st.markdown("---")
+    with st.expander("📖 TE Rules Reference (w.e.f. 1-Apr-2025)"):
+        ref_rows = []
+        for s in SLAB_TABLE:
+            ref_rows.append({
+                "Category": s["category"], "Designation Band": s["name"],
+                "Lodging (Metro/StateCap/Other)": f"{s['caps']['Metro'][0]} / {s['caps']['State Capital'][0]} / {s['caps']['Other'][0]}",
+                "Boarding (Metro/StateCap/Other)": f"{s['caps']['Metro'][1]} / {s['caps']['State Capital'][1]} / {s['caps']['Other'][1]}",
+            })
+        st.dataframe(pd.DataFrame(ref_rows), use_container_width=True, hide_index=True)
 
 
 # ----------------------------------------------------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # ----------------------------------------------------------------------
-def classify_line(line_lower):
-    """Return the policy bucket name for a line, or None if no category keyword matches."""
+def classify_line(text_lower):
     for bucket, keywords in CATEGORY_KEYWORDS.items():
         for kw in keywords:
-            if kw in line_lower:
+            if kw in text_lower:
                 return bucket
     return None
 
 
-def extract_final_amount(line):
-    """Extract ONLY the final monetary decimal token in the line (ignore distances/rates earlier in the string)."""
-    matches = AMOUNT_PATTERN.findall(line)
-    if not matches:
+def match_designation_slab(designation_text):
+    """Longest-keyword-first, word-boundary match of designation string to a policy slab."""
+    if not designation_text:
         return None
-    try:
-        return float(matches[-1])
-    except (ValueError, TypeError):
-        return None
-
-
-def extract_date_token(line):
-    """Extract a date-like token from the line, if present."""
-    match = DATE_PATTERN.search(line)
-    if match:
-        return match.group(1)
+    designation_lower = designation_text.lower()
+    candidates = []
+    for slab in SLAB_TABLE:
+        for kw in slab["keywords"]:
+            candidates.append((kw, slab))
+    candidates.sort(key=lambda pair: len(pair[0]), reverse=True)
+    for kw, slab in candidates:
+        if re.search(r"\b" + re.escape(kw) + r"\b", designation_lower):
+            return slab
     return None
 
 
-def parse_date_safe(date_token):
-    """Attempt to parse a date token into a real datetime for sorting. Returns None if unparseable."""
-    if not date_token:
+def parse_header_info(full_text):
+    info = {}
+    patterns = {
+        "Tour No": r"Tour No\.\s*([A-Za-z0-9/\-]+)",
+        "Employee Name": r"Employee Name:\s*([A-Za-z .]+?)\s+Employee ID",
+        "Employee ID": r"Employee ID:\s*(\S+)",
+        "Designation": r"Designation:\s*([A-Za-z.() ]+?)\s+Days",
+        "Start Date Raw": r"Start Date:\s*([\d/]+\s+[\d:]+)",
+        "End Date Raw": r"End Date:\s*([\d/]+\s+[\d:]+)",
+        "Days": r"\bDays\s+(\d+)",
+        "Advance": r"Advance received.*?:\s*([\d,]+)",
+        "PDF Grand Total": r"Grand Total,\s*Rs\.:\s*([\d,]+\.\d{2})",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, full_text, re.S)
+        info[key] = match.group(1).strip() if match else None
+
+    info["Start Date"] = None
+    info["End Date"] = None
+    try:
+        if info["Start Date Raw"]:
+            info["Start Date"] = datetime.strptime(info["Start Date Raw"], HEADER_DATE_FMT)
+    except ValueError:
+        pass
+    try:
+        if info["End Date Raw"]:
+            info["End Date"] = datetime.strptime(info["End Date Raw"], HEADER_DATE_FMT)
+    except ValueError:
+        pass
+
+    try:
+        info["Advance"] = float(info["Advance"].replace(",", "")) if info["Advance"] else None
+    except (ValueError, AttributeError):
+        info["Advance"] = None
+    try:
+        info["PDF Grand Total"] = float(info["PDF Grand Total"].replace(",", "")) if info["PDF Grand Total"] else None
+    except (ValueError, AttributeError):
+        info["PDF Grand Total"] = None
+
+    return info
+
+
+def parse_expense_row(row):
+    """Parse one 'Expenses Detail' table row (from pdfplumber table extraction) into a claim line item."""
+    cells = [str(c).strip() for c in row if c is not None and str(c).strip() != ""]
+    if not cells:
         return None
-    for fmt in DATE_FORMATS:
-        try:
-            return datetime.strptime(date_token, fmt)
-        except ValueError:
+
+    sn_candidate = cells[0].strip()
+    if not sn_candidate.isdigit():
+        return None
+
+    date_val = None
+    for c in cells[1:4]:
+        cclean = c.replace("\n", "").replace(" ", "")
+        m = re.match(r"^(\d{4}-\d{2}-\d{2})$", cclean)
+        if m:
+            date_val = m.group(1)
+            break
+    if date_val is None:
+        joined_clean = "".join(c.replace("\n", "").replace(" ", "") for c in cells)
+        m = DATE_PATTERN.search(joined_clean)
+        if m:
+            date_val = m.group(1)
+    if date_val is None:
+        return None
+
+    full_text = " ".join(c.replace("\n", " ") for c in cells)
+    bucket = classify_line(full_text.lower())
+    if bucket is None:
+        return None
+
+    amount = None
+    for c in reversed(cells):
+        m = AMOUNT_PATTERN.search(c)
+        if m:
+            amount = float(m.group(0))
+            break
+    if amount is None:
+        return None
+
+    distance = None
+    for c in cells:
+        cs = c.strip()
+        if cs.isdigit() and len(cs) <= 4 and cs != sn_candidate:
+            distance = cs
+            break
+
+    place = None
+    for c in cells[1:]:
+        cs = c.strip()
+        cclean = cs.replace("\n", "").replace(" ", "")
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", cclean):
             continue
-    return None
+        low = cs.lower()
+        if any(kw in low for kws in CATEGORY_KEYWORDS.values() for kw in kws):
+            break
+        if cs and not cs.isdigit():
+            place = cs.replace("\n", " ").strip()
+            break
+
+    try:
+        parsed_date = datetime.strptime(date_val, "%Y-%m-%d")
+    except ValueError:
+        parsed_date = None
+
+    return {
+        "SN": sn_candidate,
+        "Date": date_val,
+        "Date_Parsed": parsed_date,
+        "Place": place,
+        "Bucket": bucket,
+        "Distance (Km)": distance,
+        "Claimed Amount": amount,
+        "Raw Row": full_text.strip(),
+    }
 
 
-def extract_hour_value(line):
-    """Extract a 24-hour float hour value (e.g. 18.5 for 6:30 PM) from the line, if present."""
-    match = TIME_PATTERN.search(line)
-    if not match:
+def parse_jv_row(row):
+    """Parse one 'JV Detail' summary table row (for reconciliation only — never mixed with claim lines)."""
+    cells = [str(c).strip() for c in row if c is not None and str(c).strip() != ""]
+    if len(cells) < 4:
+        return None
+    if not cells[0].isdigit() or not cells[1].isdigit():
+        return None
+    if not AMOUNT_PATTERN.match(cells[-1]) or not AMOUNT_PATTERN.match(cells[-2]):
+        return None
+    expense_type_raw = cells[2]
+    bucket = classify_line(expense_type_raw.lower())
+    if bucket is None:
         return None
     try:
-        hour = int(match.group(1))
-        minute = int(match.group(2))
-        meridian = match.group(3)
-        if meridian:
-            meridian = meridian.upper()
-            if meridian == "PM" and hour != 12:
-                hour += 12
-            if meridian == "AM" and hour == 12:
-                hour = 0
-        return hour + (minute / 60.0)
-    except (ValueError, TypeError):
+        applied = float(cells[-2])
+        approved = float(cells[-1])
+    except ValueError:
         return None
+    return {"Bucket": bucket, "Account Code": cells[1], "JV Applied": applied, "JV Approved": approved}
 
 
-# ----------------------------------------------------------------------
-# CORE PDF PARSING (STRICT BOUNDARY-AWARE)
-# ----------------------------------------------------------------------
-def parse_expense_pdf(file_bytes):
-    """
-    Strict parsing architecture:
-      1. Stream through every page's text lines in order (Expense Detail spans page boundaries).
-      2. Skip everything (including the entire JV Detail block) until the
-         'Expense Detail' keyword is encountered.
-      3. Only after that boundary, evaluate each line for a valid
-         transaction category keyword.
-      4. For each valid line, capture ONLY the final currency-formatted
-         decimal token — never intermediate distances/rates/reference numbers.
-    """
-    collected_rows = []
-    boundary_found = False
-    raw_lines = []
-
+def parse_tr_pdf(file_bytes):
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        full_text = "\n".join((page.extract_text() or "") for page in pdf.pages)
+        all_rows = []
         for page in pdf.pages:
-            page_text = page.extract_text() or ""
-            for text_line in page_text.split("\n"):
-                raw_lines.append(text_line)
+            for table in page.extract_tables():
+                all_rows.extend(table)
 
-    for raw_line in raw_lines:
-        clean_line = raw_line.strip()
-        if not clean_line:
-            continue
+    header_info = parse_header_info(full_text)
 
-        if not boundary_found:
-            if SECTION_START_KEYWORD in clean_line.lower():
-                boundary_found = True
-            continue
+    expense_rows = []
+    for row in all_rows:
+        parsed = parse_expense_row(row)
+        if parsed:
+            expense_rows.append(parsed)
 
-        line_lower = clean_line.lower()
-        bucket = classify_line(line_lower)
-        if bucket is None:
-            continue
+    jv_rows = []
+    for row in all_rows:
+        parsed = parse_jv_row(row)
+        if parsed:
+            jv_rows.append(parsed)
 
-        amount = extract_final_amount(clean_line)
-        if amount is None:
-            continue
-
-        date_token = extract_date_token(clean_line)
-        hour_value = extract_hour_value(clean_line)
-
-        collected_rows.append(
-            {
-                "Bucket": bucket,
-                "Date_Token": date_token,
-                "Date_Parsed": parse_date_safe(date_token),
-                "Hour": hour_value,
-                "Claimed Amount": amount,
-                "Raw Line": clean_line,
-            }
-        )
-
-    return pd.DataFrame(collected_rows)
+    return header_info, pd.DataFrame(expense_rows), pd.DataFrame(jv_rows)
 
 
 # ----------------------------------------------------------------------
 # POLICY ENGINE
 # ----------------------------------------------------------------------
-def compute_boarding_approval(df_bucket, daily_cap):
-    """
-    Group boarding/food items by date, then apply the check-in/out
-    factor logic:
-      - Start day, check-in after 6 PM  -> 30% of cap
-      - End day, check-out before 12 PM -> 30% of cap
-      - Middle days                     -> 100% of cap
-    Approved for each date = min(claimed sum for that date, cap * factor)
-    """
+def audit_boarding(df_bucket, daily_cap, start_dt, end_dt):
+    rows = []
     if df_bucket.empty:
-        return df_bucket.assign(**{"Approved Amount": []}), pd.DataFrame()
+        return pd.DataFrame(rows)
 
-    df = df_bucket.copy()
-    df["Date_Key"] = df["Date_Token"].fillna("UNKNOWN")
+    start_date = start_dt.date() if start_dt else None
+    end_date = end_dt.date() if end_dt else None
 
-    unique_dates = df[["Date_Key", "Date_Parsed"]].drop_duplicates()
-    parseable = unique_dates.dropna(subset=["Date_Parsed"]).sort_values("Date_Parsed")
+    for date_str, group in df_bucket.groupby("Date", sort=True):
+        claimed = round(group["Claimed Amount"].sum(), 2)
+        try:
+            this_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            this_date = None
 
-    if len(parseable) >= 1:
-        ordered_keys = parseable["Date_Key"].tolist()
-        unparsed_keys = [k for k in unique_dates["Date_Key"].tolist() if k not in ordered_keys]
-        ordered_keys.extend(unparsed_keys)
-    else:
-        ordered_keys = unique_dates["Date_Key"].tolist()
+        out_of_range = False
+        if start_date and end_date and this_date:
+            out_of_range = this_date < start_date or this_date > end_date
 
-    start_key = ordered_keys[0] if ordered_keys else None
-    end_key = ordered_keys[-1] if ordered_keys else None
+        if out_of_range:
+            factor, reason, approved = 0.0, "⛔ Outside tour date range — NOT approved", 0.0
+        elif isinstance(daily_cap, str):
+            factor, reason, approved = 1.0, "On actuals (Director slab)", claimed
+        else:
+            if start_date and end_date and start_date == end_date:
+                factor, reason = 1.0, "Single-day trip — 100%"
+            elif start_date and this_date == start_date:
+                if start_dt.hour + start_dt.minute / 60.0 > 18.0:
+                    factor, reason = 0.30, "Start day, check-in after 6 PM — 30%"
+                else:
+                    factor, reason = 1.0, "Start day, normal check-in — 100%"
+            elif end_date and this_date == end_date:
+                if end_dt.hour + end_dt.minute / 60.0 < 12.0:
+                    factor, reason = 0.30, "End day, check-out before 12 PM — 30%"
+                else:
+                    factor, reason = 1.0, "End day, normal check-out — 100%"
+            else:
+                factor, reason = 1.0, "Middle day — 100%"
+            limit = round(daily_cap * factor, 2)
+            approved = round(min(claimed, limit), 2)
 
-    day_summary_rows = []
-    df["Approved Amount"] = 0.0
-
-    for date_key in ordered_keys:
-        day_mask = df["Date_Key"] == date_key
-        day_claimed = df.loc[day_mask, "Claimed Amount"].sum()
-        day_hours = df.loc[day_mask, "Hour"].dropna().tolist()
-
-        factor = 1.0
-        factor_reason = "Middle day — 100%"
-
-        is_start = date_key == start_key
-        is_end = date_key == end_key
-        single_day_trip = is_start and is_end
-
-        if single_day_trip:
-            factor = 1.0
-            factor_reason = "Single-day trip — 100%"
-        elif is_start and any(h > 18.0 for h in day_hours):
-            factor = 0.30
-            factor_reason = "Start day, check-in after 6 PM — 30%"
-        elif is_end and any(h < 12.0 for h in day_hours):
-            factor = 0.30
-            factor_reason = "End day, check-out before 12 PM — 30%"
-        elif is_start or is_end:
-            factor = 1.0
-            factor_reason = "Boundary day, no late/early flag — 100%"
-
-        day_limit = round(daily_cap * factor, 2)
-        day_approved = round(min(day_claimed, day_limit), 2)
-
-        df.loc[day_mask, "Approved Amount"] = day_approved / max(day_mask.sum(), 1)
-
-        day_summary_rows.append(
-            {
-                "Date": date_key,
-                "Claimed": round(day_claimed, 2),
-                "Applicable Cap": day_limit,
-                "Factor Applied": factor_reason,
-                "Approved": day_approved,
-            }
-        )
-
-    day_detail_df = pd.DataFrame(day_summary_rows)
-    return df, day_detail_df
+        rows.append({
+            "Date": date_str, "Claimed (Rs.)": claimed,
+            "Applicable Cap (Rs.)": "Actuals" if isinstance(daily_cap, str) else round(daily_cap * factor, 2),
+            "Rule Applied": reason, "Approved (Rs.)": approved,
+        })
+    return pd.DataFrame(rows)
 
 
-def compute_lodging_approval(df_bucket, daily_cap):
-    """
-    Cap each lodging line item (or date-grouped total) at the daily cap.
-    Anything above the cap is flagged as a policy deduction.
-    """
+def audit_lodging(df_bucket, daily_cap, start_dt, end_dt):
+    rows = []
     if df_bucket.empty:
-        return df_bucket.assign(**{"Approved Amount": [], "Deduction": []}), pd.DataFrame()
+        return pd.DataFrame(rows), 0, 0
 
-    df = df_bucket.copy()
-    df["Date_Key"] = df["Date_Token"].fillna("UNKNOWN")
+    start_date = start_dt.date() if start_dt else None
+    end_date = end_dt.date() if end_dt else None
+    expected_nights = (end_date - start_date).days if (start_date and end_date) else None
 
-    day_summary_rows = []
-    df["Approved Amount"] = 0.0
-    df["Deduction"] = 0.0
+    for date_str, group in df_bucket.groupby("Date", sort=True):
+        claimed = round(group["Claimed Amount"].sum(), 2)
+        try:
+            this_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            this_date = None
 
-    for date_key, group in df.groupby("Date_Key", sort=False):
-        day_claimed = group["Claimed Amount"].sum()
-        day_approved = round(min(day_claimed, daily_cap), 2)
-        day_deduction = round(max(day_claimed - daily_cap, 0.0), 2)
+        out_of_range = False
+        if start_date and end_date and this_date:
+            out_of_range = this_date < start_date or this_date > end_date
 
-        mask = df["Date_Key"] == date_key
-        count = mask.sum()
-        df.loc[mask, "Approved Amount"] = day_approved / max(count, 1)
-        df.loc[mask, "Deduction"] = day_deduction / max(count, 1)
+        if out_of_range:
+            approved, deduction, flag = 0.0, claimed, "⛔ Outside tour date range — NOT approved"
+        elif isinstance(daily_cap, str):
+            approved, deduction, flag = claimed, 0.0, "On actuals (Director slab)"
+        else:
+            approved = round(min(claimed, daily_cap), 2)
+            deduction = round(max(claimed - daily_cap, 0.0), 2)
+            flag = "⚠️ Over daily cap" if deduction > 0 else "✅ Within cap"
 
-        day_summary_rows.append(
-            {
-                "Date": date_key,
-                "Claimed": round(day_claimed, 2),
-                "Daily Cap": daily_cap,
-                "Approved": day_approved,
-                "Policy Deduction": day_deduction,
-                "Flag": "⚠️ Over Cap" if day_deduction > 0 else "✅ Within Cap",
-            }
-        )
+        rows.append({
+            "Date": date_str, "Claimed (Rs.)": claimed,
+            "Daily Cap (Rs.)": "Actuals" if isinstance(daily_cap, str) else daily_cap,
+            "Approved (Rs.)": approved, "Deduction (Rs.)": deduction, "Flag": flag,
+        })
 
-    day_detail_df = pd.DataFrame(day_summary_rows)
-    return df, day_detail_df
+    actual_nights = df_bucket["Date"].nunique()
+    return pd.DataFrame(rows), actual_nights, expected_nights
 
 
-def compute_actuals_approval(df_bucket):
-    """Conveyance and Travel Ticket are approved on actuals — no cap logic."""
+def audit_actuals(df_bucket, start_dt, end_dt):
     if df_bucket.empty:
         return df_bucket.assign(**{"Approved Amount": []})
     df = df_bucket.copy()
-    df["Approved Amount"] = df["Claimed Amount"]
+    start_date = start_dt.date() if start_dt else None
+    end_date = end_dt.date() if end_dt else None
+
+    def _approve(row):
+        try:
+            this_date = datetime.strptime(row["Date"], "%Y-%m-%d").date()
+        except ValueError:
+            return row["Claimed Amount"]
+        if start_date and end_date and (this_date < start_date or this_date > end_date):
+            return 0.0
+        return row["Claimed Amount"]
+
+    df["Approved Amount"] = df.apply(_approve, axis=1)
+    df["Flag"] = df.apply(
+        lambda r: "⛔ Outside tour date range" if r["Approved Amount"] == 0 and r["Claimed Amount"] > 0 else "✅ On actuals",
+        axis=1,
+    )
     return df
 
 
-def count_units(df_bucket, is_dated_bucket):
-    """Distinct dates for Boarding/Lodging; row count for Conveyance/Ticket."""
-    if df_bucket.empty:
-        return 0
-    if is_dated_bucket:
-        dated = df_bucket["Date_Token"].fillna("UNKNOWN")
-        return dated.nunique()
-    return len(df_bucket)
-
-
 # ----------------------------------------------------------------------
-# MAIN APPLICATION FLOW
+# MAIN FLOW
 # ----------------------------------------------------------------------
 if uploaded_file is None:
-    st.info("👆 Upload a TIPL travel expense PDF above to begin the auto-audit.")
+    st.info("👆 Upload a TIPL Tour Expense (TR) PDF above to run the auto-audit.")
     st.stop()
 
 if pdfplumber is None:
@@ -353,89 +443,142 @@ if pdfplumber is None:
 
 try:
     file_bytes = uploaded_file.read()
-    parsed_df = parse_expense_pdf(file_bytes)
+    header_info, expense_df, jv_df = parse_tr_pdf(file_bytes)
 except Exception as exc:
-    st.error("Could not parse the uploaded PDF. Please confirm it is a valid TIPL expense statement.")
+    st.error("Could not parse the uploaded PDF. Please confirm it is a valid TIPL TR statement.")
     st.exception(exc)
     st.stop()
 
-if parsed_df.empty:
-    st.warning(
-        "No valid line items were found under the 'Expense Detail' section. "
-        "Please verify the PDF contains a section explicitly titled 'Expense Detail' "
-        "with recognizable category keywords (boarding, food, lodging, hotel, travel, "
-        "ticket, train, rail, conveyance, taxi, auto)."
-    )
+if expense_df.empty:
+    st.warning("No valid line items were found in the 'Expenses Detail' table of this PDF. Please check the file.")
     st.stop()
 
-st.success(f"Parsed {len(parsed_df)} valid transaction line item(s) from the 'Expense Detail' section.")
+# ---------------------- Header card ----------------------
+st.subheader("🗂️ Tour Information")
+h1, h2, h3, h4 = st.columns(4)
+h1.metric("Tour No.", header_info.get("Tour No") or "—")
+h2.metric("Employee", header_info.get("Employee Name") or "—")
+h3.metric("Designation", header_info.get("Designation") or "—")
+h4.metric("Days", header_info.get("Days") or "—")
 
-with st.expander("🔍 View Raw Extracted Line Items (debug / traceability)"):
-    st.dataframe(
-        parsed_df[["Bucket", "Date_Token", "Hour", "Claimed Amount", "Raw Line"]].rename(
-            columns={"Date_Token": "Date", "Hour": "Detected Hour"}
-        ),
-        use_container_width=True,
-    )
+start_dt = header_info.get("Start Date")
+end_dt = header_info.get("End Date")
+d1, d2 = st.columns(2)
+d1.info(f"**Tour Start:** {start_dt.strftime('%d-%b-%Y %I:%M %p') if start_dt else 'Not detected'}")
+d2.info(f"**Tour End:** {end_dt.strftime('%d-%b-%Y %I:%M %p') if end_dt else 'Not detected'}")
+
+# ---------------------- Slab detection ----------------------
+if manual_category_override and manual_category:
+    cat_num = int(manual_category.split(":")[0].replace("Category", "").strip())
+    slab = next(s for s in SLAB_TABLE if s["category"] == cat_num)
+else:
+    slab = match_designation_slab(header_info.get("Designation"))
+
+if slab is None:
+    st.error("Could not auto-match this Designation to a TE Rules slab. Please tick 'Manually select Designation Slab' in the sidebar.")
+    st.stop()
+
+lodging_cap, boarding_cap = slab["caps"][place_category]
+st.success(
+    f"**Policy Slab Detected:** Category {slab['category']} — {slab['name']}  |  "
+    f"**Place Category:** {place_category}  |  "
+    f"**Lodging Cap:** ₹{lodging_cap}/night  |  **Boarding Cap:** ₹{boarding_cap}/day"
+)
 
 st.divider()
 
 # ---------------------- Split into buckets ----------------------
-df_boarding = parsed_df[parsed_df["Bucket"] == "Boarding(Food)"].copy()
-df_lodging = parsed_df[parsed_df["Bucket"] == "Lodging(Hotel)"].copy()
-df_conveyance = parsed_df[parsed_df["Bucket"] == "Conveyance(Local)"].copy()
-df_ticket = parsed_df[parsed_df["Bucket"] == "Travel Ticket"].copy()
+df_boarding = expense_df[expense_df["Bucket"] == "Boarding(Food)"].copy()
+df_lodging = expense_df[expense_df["Bucket"] == "Lodging(Hotel)"].copy()
+df_conveyance = expense_df[expense_df["Bucket"] == "Conveyance(Local)"].copy()
+df_ticket = expense_df[expense_df["Bucket"] == "Travel Ticket"].copy()
 
-# ---------------------- Apply policy engine ----------------------
-boarding_detail, boarding_day_summary = compute_boarding_approval(df_boarding, boarding_daily_cap)
-lodging_detail, lodging_day_summary = compute_lodging_approval(df_lodging, lodging_daily_cap)
-conveyance_detail = compute_actuals_approval(df_conveyance)
-ticket_detail = compute_actuals_approval(df_ticket)
+# ---------------------- Run policy engine ----------------------
+boarding_day_summary = audit_boarding(df_boarding, boarding_cap, start_dt, end_dt)
+lodging_day_summary, lodging_actual_nights, lodging_expected_nights = audit_lodging(df_lodging, lodging_cap, start_dt, end_dt)
+conveyance_detail = audit_actuals(df_conveyance, start_dt, end_dt)
+ticket_detail = audit_actuals(df_ticket, start_dt, end_dt)
 
-# ---------------------- Build summary table ----------------------
-summary_rows = []
+boarding_claimed = round(df_boarding["Claimed Amount"].sum(), 2) if not df_boarding.empty else 0.0
+boarding_approved = round(boarding_day_summary["Approved (Rs.)"].sum(), 2) if not boarding_day_summary.empty else 0.0
+lodging_claimed = round(df_lodging["Claimed Amount"].sum(), 2) if not df_lodging.empty else 0.0
+lodging_approved = round(lodging_day_summary["Approved (Rs.)"].sum(), 2) if not lodging_day_summary.empty else 0.0
+conveyance_claimed = round(conveyance_detail["Claimed Amount"].sum(), 2) if not conveyance_detail.empty else 0.0
+conveyance_approved = round(conveyance_detail["Approved Amount"].sum(), 2) if not conveyance_detail.empty else 0.0
+ticket_claimed = round(ticket_detail["Claimed Amount"].sum(), 2) if not ticket_detail.empty else 0.0
+ticket_approved = round(ticket_detail["Approved Amount"].sum(), 2) if not ticket_detail.empty else 0.0
 
-summary_rows.append(
-    {
-        "Expense Type": "Boarding(Food)",
-        "Total Days / Units": count_units(df_boarding, is_dated_bucket=True),
-        "Total Claimed Amount (₹)": round(boarding_detail["Claimed Amount"].sum(), 2) if not boarding_detail.empty else 0.0,
-        "Total Approved Amount (₹)": round(boarding_detail["Approved Amount"].sum(), 2) if not boarding_detail.empty else 0.0,
-    }
-)
-summary_rows.append(
-    {
-        "Expense Type": "Lodging(Hotel)",
-        "Total Days / Units": count_units(df_lodging, is_dated_bucket=True),
-        "Total Claimed Amount (₹)": round(lodging_detail["Claimed Amount"].sum(), 2) if not lodging_detail.empty else 0.0,
-        "Total Approved Amount (₹)": round(lodging_detail["Approved Amount"].sum(), 2) if not lodging_detail.empty else 0.0,
-    }
-)
-summary_rows.append(
-    {
-        "Expense Type": "Conveyance(Local)",
-        "Total Days / Units": count_units(df_conveyance, is_dated_bucket=False),
-        "Total Claimed Amount (₹)": round(conveyance_detail["Claimed Amount"].sum(), 2) if not conveyance_detail.empty else 0.0,
-        "Total Approved Amount (₹)": round(conveyance_detail["Approved Amount"].sum(), 2) if not conveyance_detail.empty else 0.0,
-    }
-)
-summary_rows.append(
-    {
-        "Expense Type": "Travel Ticket",
-        "Total Days / Units": count_units(df_ticket, is_dated_bucket=False),
-        "Total Claimed Amount (₹)": round(ticket_detail["Claimed Amount"].sum(), 2) if not ticket_detail.empty else 0.0,
-        "Total Approved Amount (₹)": round(ticket_detail["Approved Amount"].sum(), 2) if not ticket_detail.empty else 0.0,
-    }
-)
-
-summary_df = pd.DataFrame(summary_rows)
+# ---------------------- Summary table ----------------------
+summary_df = pd.DataFrame([
+    {"Expense Type": "Boarding(Food)", "Total Days / Units": df_boarding["Date"].nunique() if not df_boarding.empty else 0,
+     "Total Claimed Amount (Rs.)": boarding_claimed, "Total Approved Amount (Rs.)": boarding_approved,
+     "Verdict": "✅ Compliant" if boarding_claimed == boarding_approved else "⚠️ Deduction Applied"},
+    {"Expense Type": "Lodging(Hotel)", "Total Days / Units": df_lodging["Date"].nunique() if not df_lodging.empty else 0,
+     "Total Claimed Amount (Rs.)": lodging_claimed, "Total Approved Amount (Rs.)": lodging_approved,
+     "Verdict": "✅ Compliant" if lodging_claimed == lodging_approved else "⚠️ Deduction Applied"},
+    {"Expense Type": "Conveyance(Local)", "Total Days / Units": len(df_conveyance),
+     "Total Claimed Amount (Rs.)": conveyance_claimed, "Total Approved Amount (Rs.)": conveyance_approved,
+     "Verdict": "✅ Compliant" if conveyance_claimed == conveyance_approved else "⚠️ Deduction Applied"},
+    {"Expense Type": "Travel Ticket", "Total Days / Units": len(df_ticket),
+     "Total Claimed Amount (Rs.)": ticket_claimed, "Total Approved Amount (Rs.)": ticket_approved,
+     "Verdict": "✅ Compliant" if ticket_claimed == ticket_approved else "⚠️ Deduction Applied"},
+])
 
 st.subheader("📊 Audit Summary by Expense Type")
-st.table(summary_df.style.format({"Total Claimed Amount (₹)": "{:.2f}", "Total Approved Amount (₹)": "{:.2f}"}))
+st.table(summary_df.style.format({"Total Claimed Amount (Rs.)": "{:.2f}", "Total Approved Amount (Rs.)": "{:.2f}"}))
 
-# ---------------------- Detailed breakdowns ----------------------
+# ---------------------- Plain-language verdict ----------------------
+st.subheader("📝 Easy Summary")
+verdict_lines = []
+
+verdict_lines.append(f"- Designation **{header_info.get('Designation') or '—'}** → Policy **Category {slab['category']}** ({slab['name']}), Place Category treated as **{place_category}**.")
+
+all_dates_ok = True
+if start_dt and end_dt:
+    oob_boarding = boarding_day_summary[boarding_day_summary["Rule Applied"].astype(str).str.contains("Outside")] if not boarding_day_summary.empty else pd.DataFrame()
+    oob_lodging = lodging_day_summary[lodging_day_summary["Flag"].astype(str).str.contains("Outside")] if not lodging_day_summary.empty else pd.DataFrame()
+    oob_conv = conveyance_detail[conveyance_detail.get("Flag", pd.Series(dtype=str)).astype(str).str.contains("Outside")] if not conveyance_detail.empty else pd.DataFrame()
+    oob_ticket = ticket_detail[ticket_detail.get("Flag", pd.Series(dtype=str)).astype(str).str.contains("Outside")] if not ticket_detail.empty else pd.DataFrame()
+    total_oob = len(oob_boarding) + len(oob_lodging) + len(oob_conv) + len(oob_ticket)
+    if total_oob == 0:
+        verdict_lines.append(f"- ✅ All claim dates fall within the tour boundary **{start_dt.date()} to {end_dt.date()}** — no out-of-range claims found.")
+    else:
+        all_dates_ok = False
+        verdict_lines.append(f"- ⛔ **{total_oob} line item(s)** have dates OUTSIDE the tour's Start/End range and have been marked NOT approved.")
+else:
+    verdict_lines.append("- ⚠️ Tour Start/End date-time could not be detected — date-boundary check was skipped.")
+
+if not boarding_day_summary.empty:
+    if boarding_claimed == boarding_approved:
+        verdict_lines.append(f"- ✅ Boarding(Food): all {df_boarding['Date'].nunique()} day(s) claimed at or below the ₹{boarding_cap}/day cap.")
+    else:
+        verdict_lines.append(f"- ⚠️ Boarding(Food): claimed ₹{boarding_claimed} vs approved ₹{boarding_approved} — factor/cap deductions applied (see day-wise table).")
+
+if not lodging_day_summary.empty:
+    nights_note = ""
+    if lodging_expected_nights is not None:
+        if lodging_actual_nights == lodging_expected_nights:
+            nights_note = f" Night count ({lodging_actual_nights}) matches expected nights for a {header_info.get('Days')}-day tour."
+        else:
+            nights_note = f" ⚠️ {lodging_actual_nights} night(s) claimed vs {lodging_expected_nights} expected for this tour duration — please verify."
+    if lodging_claimed == lodging_approved:
+        verdict_lines.append(f"- ✅ Lodging(Hotel): all nights within the ₹{lodging_cap}/night cap.{nights_note}")
+    else:
+        verdict_lines.append(f"- ⚠️ Lodging(Hotel): claimed ₹{lodging_claimed} vs approved ₹{lodging_approved} — amounts above cap were deducted.{nights_note}")
+
+if not conveyance_detail.empty:
+    verdict_lines.append(f"- ✅ Conveyance(Local): {len(df_conveyance)} trip(s) approved on actuals (Taxi/Auto), total ₹{conveyance_approved}.")
+if not ticket_detail.empty:
+    verdict_lines.append(f"- ✅ Travel Ticket: {len(df_ticket)} ticket(s) approved on actuals, total ₹{ticket_approved}.")
+elif df_ticket.empty:
+    verdict_lines.append("- ℹ️ No Travel Ticket claims found (likely booked directly by the company, which per Rule IV.9 does not need to be claimed).")
+
+st.markdown("\n".join(verdict_lines))
+
+st.divider()
+
+# ---------------------- Detailed day-wise breakdown ----------------------
 st.subheader("📁 Detailed Policy Breakdown")
-
 col_a, col_b = st.columns(2)
 
 with col_a:
@@ -447,13 +590,8 @@ with col_a:
 
     st.markdown("**Conveyance(Local) — Actuals**")
     if not conveyance_detail.empty:
-        st.dataframe(
-            conveyance_detail[["Date_Token", "Claimed Amount", "Approved Amount", "Raw Line"]].rename(
-                columns={"Date_Token": "Date"}
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(conveyance_detail[["Date", "Place", "Claimed Amount", "Approved Amount", "Distance (Km)"]],
+                     use_container_width=True, hide_index=True)
     else:
         st.caption("No conveyance line items found.")
 
@@ -466,32 +604,53 @@ with col_b:
 
     st.markdown("**Travel Ticket — Actuals**")
     if not ticket_detail.empty:
-        st.dataframe(
-            ticket_detail[["Date_Token", "Claimed Amount", "Approved Amount", "Raw Line"]].rename(
-                columns={"Date_Token": "Date"}
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(ticket_detail[["Date", "Place", "Claimed Amount", "Approved Amount"]],
+                     use_container_width=True, hide_index=True)
     else:
         st.caption("No travel ticket line items found.")
+
+with st.expander("🔍 View Raw Extracted Line Items (traceability)"):
+    st.dataframe(expense_df[["SN", "Date", "Place", "Bucket", "Distance (Km)", "Claimed Amount", "Raw Row"]],
+                 use_container_width=True, hide_index=True)
+
+st.divider()
+
+# ---------------------- JV Detail reconciliation ----------------------
+st.subheader("🔁 Reconciliation vs PDF's JV Detail Summary")
+if jv_df.empty:
+    st.caption("No JV Detail summary block found in this PDF to reconcile against.")
+else:
+    jv_grouped = jv_df.groupby("Bucket").agg(**{"JV Applied (Rs.)": ("JV Applied", "sum"), "JV Approved (Rs.)": ("JV Approved", "sum")}).reset_index()
+    computed = pd.DataFrame([
+        {"Bucket": "Boarding(Food)", "Expense Detail Claimed (Rs.)": boarding_claimed},
+        {"Bucket": "Lodging(Hotel)", "Expense Detail Claimed (Rs.)": lodging_claimed},
+        {"Bucket": "Conveyance(Local)", "Expense Detail Claimed (Rs.)": conveyance_claimed},
+        {"Bucket": "Travel Ticket", "Expense Detail Claimed (Rs.)": ticket_claimed},
+    ])
+    recon = computed.merge(jv_grouped, on="Bucket", how="left")
+    recon["JV Applied (Rs.)"] = recon["JV Applied (Rs.)"].fillna(0.0)
+    recon["Match?"] = recon.apply(
+        lambda r: "✅ Match" if abs(r["Expense Detail Claimed (Rs.)"] - r["JV Applied (Rs.)"]) < 0.01 else "⚠️ Mismatch",
+        axis=1,
+    )
+    st.dataframe(recon.rename(columns={"Bucket": "Expense Type"}), use_container_width=True, hide_index=True)
 
 st.divider()
 
 # ---------------------- Grand totals ----------------------
-grand_claimed = round(summary_df["Total Claimed Amount (₹)"].sum(), 2)
-grand_approved = round(summary_df["Total Approved Amount (₹)"].sum(), 2)
+grand_claimed = round(boarding_claimed + lodging_claimed + conveyance_claimed + ticket_claimed, 2)
+grand_approved = round(boarding_approved + lodging_approved + conveyance_approved + ticket_approved, 2)
 grand_delta = round(grand_approved - grand_claimed, 2)
 
 st.subheader("🧮 Grand Total — Claimed vs Approved")
+m1, m2, m3 = st.columns(3)
+m1.metric("Grand Total Claimed (Rs.)", f"{grand_claimed:,.2f}")
+m2.metric("Grand Total Approved (Rs.)", f"{grand_approved:,.2f}", delta=f"{grand_delta:,.2f}")
+m3.metric("Policy Deduction (Rs.)", f"{round(grand_claimed - grand_approved, 2):,.2f}")
 
-metric_col1, metric_col2, metric_col3 = st.columns(3)
-metric_col1.metric("Grand Total Claimed (₹)", f"{grand_claimed:,.2f}")
-metric_col2.metric("Grand Total Approved (₹)", f"{grand_approved:,.2f}", delta=f"{grand_delta:,.2f}")
-metric_col3.metric(
-    "Policy Deduction (₹)",
-    f"{round(grand_claimed - grand_approved, 2):,.2f}",
-    delta=f"-{round(grand_claimed - grand_approved, 2):,.2f}" if grand_claimed > grand_approved else "0.00",
-)
+if header_info.get("Advance") is not None:
+    balance = round(header_info["Advance"] - grand_approved, 2)
+    st.info(f"**Advance Received:** ₹{header_info['Advance']:,.2f}  |  **Approved Claim:** ₹{grand_approved:,.2f}  |  **Balance to be {'returned by employee' if balance >= 0 else 'reimbursed to employee'}:** ₹{abs(balance):,.2f}")
 
-st.caption(f"Employee Category: {employee_category} | Boarding Cap: ₹{boarding_daily_cap}/day | Lodging Cap: ₹{lodging_daily_cap}/day")
+if header_info.get("PDF Grand Total") is not None and abs(header_info["PDF Grand Total"] - grand_claimed) > 0.01:
+    st.warning(f"⚠️ PDF's own Grand Total (₹{header_info['PDF Grand Total']:,.2f}) does not match the sum of parsed line items (₹{grand_claimed:,.2f}). Please verify manually.")
