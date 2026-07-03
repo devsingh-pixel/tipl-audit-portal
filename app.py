@@ -129,6 +129,17 @@ DSIC_BRACKETS = [
      "conveyance_tiers": ["Rental <= 6000", "Rental <= 6000", "Rental <= 6000"]},
 ]
 
+# When a DSIC tour's total claimed Lodging (or Conveyance) days exceed 30,
+# the tiered day-brackets above are NOT used. Instead the whole claim is
+# audited at a single per-day-equivalent rate derived from the Rental cap
+# (Rental cap / 30 days), applied uniformly across every claimed day of the
+# ENTIRE tour - e.g. 36 lodging nights -> 36 x (10000/30) = 36 x 333.33.
+RENTAL_BRACKET_DAYS = 30
+RENTAL_LODGING_CAP_TOTAL = 10000
+RENTAL_CONVEYANCE_CAP_TOTAL = 6000
+RENTAL_LODGING_PER_DAY = RENTAL_LODGING_CAP_TOTAL / RENTAL_BRACKET_DAYS
+RENTAL_CONVEYANCE_PER_DAY = RENTAL_CONVEYANCE_CAP_TOTAL / RENTAL_BRACKET_DAYS
+
 
 def dsic_tier_index(category_num):
     if category_num >= 4:
@@ -254,9 +265,16 @@ def auto_detect_place_category(place_names):
 
 
 def is_dsic_tour(header_info):
-    dept = (header_info.get("Employee Department") or "").lower()
+    """DSIC rules apply ONLY to employees whose Employee Department is
+    Service-DSIC (or similar). This is checked primarily from that field;
+    full-text is only used as a fallback if the Department field itself
+    could not be parsed from the PDF, so other designations/departments
+    never get the DSIC bracket rules by accident."""
+    dept = header_info.get("Employee Department")
+    if dept:
+        return "dsic" in dept.lower()
     full_text = (header_info.get("_full_text") or "").lower()
-    return "dsic" in dept or "dsic" in full_text
+    return "dsic" in full_text
 
 
 def parse_header_info(full_text):
@@ -525,9 +543,13 @@ def audit_lodging(df_bucket, daily_cap, start_dt, end_dt):
 
 
 def audit_lodging_dsic(df_bucket, start_dt, end_dt, tier_index):
-    """DSIC Lodging: cap steps down per elapsed tour-day bracket. Days falling
-    in the 26-30+ bracket are pooled and capped as ONE lump-sum Rental amount
-    (that bracket is a monthly-rental style arrangement, not a per-night rate)."""
+    """DSIC Lodging.
+    - If total claimed Lodging days <= 30: cap steps down per elapsed
+      tour-day bracket (0-5 / 6-12 / 13-25 / 26-30), as tabulated.
+    - If total claimed Lodging days > 30: the tiered brackets are NOT used.
+      Instead the Rental cap (Rs. 10000 for 30 days) is converted into a
+      per-day-equivalent rate (10000 / 30 = Rs. 333.33/day) and applied
+      UNIFORMLY across every claimed day of the whole tour."""
     rows = []
     if df_bucket.empty or start_dt is None:
         return pd.DataFrame(rows), 0, None
@@ -535,10 +557,34 @@ def audit_lodging_dsic(df_bucket, start_dt, end_dt, tier_index):
     start_date = start_dt.date()
     end_date = end_dt.date() if end_dt else None
     expected_nights = (end_date - start_date).days if end_date else None
+    total_lodging_days = df_bucket["Date"].nunique()
 
-    rental_claimed = 0.0
-    rental_dates = []
+    if total_lodging_days > RENTAL_BRACKET_DAYS:
+        # Flat per-day-equivalent-of-Rental-cap mode across the WHOLE claim
+        per_day_cap = round(RENTAL_LODGING_PER_DAY, 2)
+        for date_str, group in df_bucket.groupby("Date", sort=True):
+            claimed = round(group["Claimed Amount"].sum(), 2)
+            try:
+                this_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if end_date and (this_date < start_date or this_date > end_date):
+                rows.append({"Date": date_str, "Tour Day": "-", "Bracket": "-", "Claimed (Rs.)": claimed,
+                             "Cap (Rs.)": "-", "Approved (Rs.)": 0.0, "Deduction (Rs.)": claimed,
+                             "Flag": "⛔ Outside tour date range — NOT approved"})
+                continue
+            day_number = (this_date - start_date).days + 1
+            approved = round(min(claimed, per_day_cap), 2)
+            deduction = round(max(claimed - per_day_cap, 0.0), 2)
+            rows.append({
+                "Date": date_str, "Tour Day": day_number,
+                "Bracket": f">30 days total — flat Rental-equivalent rate (10000/30)",
+                "Claimed (Rs.)": claimed, "Cap (Rs.)": per_day_cap, "Approved (Rs.)": approved,
+                "Deduction (Rs.)": deduction, "Flag": "⚠️ Over DSIC Rental-equivalent rate" if deduction > 0 else "✅ Within cap",
+            })
+        return pd.DataFrame(rows), total_lodging_days, expected_nights
 
+    # Tiered day-bracket mode (tour total <= 30 days)
     for date_str, group in df_bucket.groupby("Date", sort=True):
         claimed = round(group["Claimed Amount"].sum(), 2)
         try:
@@ -555,48 +601,64 @@ def audit_lodging_dsic(df_bucket, start_dt, end_dt, tier_index):
         bracket = get_dsic_bracket_for_day(day_number)
         cap = bracket["lodging_tiers"][tier_index]
 
-        if isinstance(cap, str):  # Rental bracket -> pool for lump-sum handling below
-            rental_claimed += claimed
-            rental_dates.append(date_str)
-            continue
+        if isinstance(cap, str):
+            cap = round(RENTAL_LODGING_PER_DAY, 2)  # single day within a <=30-day tour's rental bracket
+            bracket_label = f"{bracket['label']} (Rental-equivalent, 10000/30)"
+        else:
+            bracket_label = bracket["label"]
 
         approved = round(min(claimed, cap), 2)
         deduction = round(max(claimed - cap, 0.0), 2)
         rows.append({
-            "Date": date_str, "Tour Day": day_number, "Bracket": bracket["label"],
+            "Date": date_str, "Tour Day": day_number, "Bracket": bracket_label,
             "Claimed (Rs.)": claimed, "Cap (Rs.)": cap, "Approved (Rs.)": approved,
             "Deduction (Rs.)": deduction, "Flag": "⚠️ Over DSIC cap" if deduction > 0 else "✅ Within cap",
         })
 
-    if rental_dates:
-        rental_cap = 10000.0
-        rental_approved = round(min(rental_claimed, rental_cap), 2)
-        rental_deduction = round(max(rental_claimed - rental_cap, 0.0), 2)
-        rows.append({
-            "Date": f"{rental_dates[0]} to {rental_dates[-1]}", "Tour Day": "26+", "Bracket": "26+ Days (Rental, lump-sum)",
-            "Claimed (Rs.)": round(rental_claimed, 2), "Cap (Rs.)": f"<= {rental_cap:.0f} (whole bracket)",
-            "Approved (Rs.)": rental_approved, "Deduction (Rs.)": rental_deduction,
-            "Flag": "⚠️ Over Rental cap — manual RA verification recommended" if rental_deduction > 0 else "✅ Within Rental cap",
-        })
-
-    actual_nights = df_bucket["Date"].nunique()
-    return pd.DataFrame(rows), actual_nights, expected_nights
+    return pd.DataFrame(rows), total_lodging_days, expected_nights
 
 
 def audit_conveyance_dsic(df_bucket, start_dt, end_dt, tier_index):
-    """DSIC Conveyance: Days 0-5 are on actuals (uncapped); Days 6-25 have a
-    daily cap; Days 26+ are pooled into ONE lump-sum Rental cap for the whole
-    tail of the tour, same logic as Lodging."""
+    """DSIC Conveyance.
+    - If total claimed Conveyance days <= 30: Days 0-5 on actuals, Days 6-25
+      have a tiered daily cap, as tabulated.
+    - If total claimed Conveyance days > 30: the tiers are NOT used. Instead
+      the Rental cap (Rs. 6000 for 30 days) is converted into a per-day-
+      equivalent rate (6000 / 30 = Rs. 200/day) and applied UNIFORMLY across
+      every claimed day of the whole tour."""
     rows = []
     if df_bucket.empty or start_dt is None:
         return pd.DataFrame(rows)
 
     start_date = start_dt.date()
     end_date = end_dt.date() if end_dt else None
+    total_conveyance_days = df_bucket["Date"].nunique()
 
-    rental_claimed = 0.0
-    rental_dates = []
+    if total_conveyance_days > RENTAL_BRACKET_DAYS:
+        per_day_cap = round(RENTAL_CONVEYANCE_PER_DAY, 2)
+        for date_str, group in df_bucket.groupby("Date", sort=True):
+            claimed = round(group["Claimed Amount"].sum(), 2)
+            try:
+                this_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if end_date and (this_date < start_date or this_date > end_date):
+                rows.append({"Date": date_str, "Tour Day": "-", "Bracket": "-", "Claimed (Rs.)": claimed,
+                             "Cap (Rs.)": "-", "Approved (Rs.)": 0.0, "Deduction (Rs.)": claimed,
+                             "Flag": "⛔ Outside tour date range — NOT approved"})
+                continue
+            day_number = (this_date - start_date).days + 1
+            approved = round(min(claimed, per_day_cap), 2)
+            deduction = round(max(claimed - per_day_cap, 0.0), 2)
+            rows.append({
+                "Date": date_str, "Tour Day": day_number,
+                "Bracket": ">30 days total — flat Rental-equivalent rate (6000/30)",
+                "Claimed (Rs.)": claimed, "Cap (Rs.)": per_day_cap, "Approved (Rs.)": approved,
+                "Deduction (Rs.)": deduction, "Flag": "⚠️ Over DSIC Rental-equivalent rate" if deduction > 0 else "✅ Within cap",
+            })
+        return pd.DataFrame(rows)
 
+    # Tiered day-bracket mode (tour total <= 30 days)
     for date_str, group in df_bucket.groupby("Date", sort=True):
         claimed = round(group["Claimed Amount"].sum(), 2)
         try:
@@ -614,8 +676,15 @@ def audit_conveyance_dsic(df_bucket, start_dt, end_dt, tier_index):
         cap = bracket["conveyance_tiers"][tier_index]
 
         if isinstance(cap, str) and cap.startswith("Rental"):
-            rental_claimed += claimed
-            rental_dates.append(date_str)
+            cap = round(RENTAL_CONVEYANCE_PER_DAY, 2)
+            bracket_label = f"{bracket['label']} (Rental-equivalent, 6000/30)"
+            approved = round(min(claimed, cap), 2)
+            deduction = round(max(claimed - cap, 0.0), 2)
+            rows.append({
+                "Date": date_str, "Tour Day": day_number, "Bracket": bracket_label,
+                "Claimed (Rs.)": claimed, "Cap (Rs.)": cap, "Approved (Rs.)": approved,
+                "Deduction (Rs.)": deduction, "Flag": "⚠️ Over DSIC cap" if deduction > 0 else "✅ Within cap",
+            })
             continue
 
         if cap == "Actuals":
@@ -630,17 +699,6 @@ def audit_conveyance_dsic(df_bucket, start_dt, end_dt, tier_index):
             "Date": date_str, "Tour Day": day_number, "Bracket": bracket["label"],
             "Claimed (Rs.)": claimed, "Cap (Rs.)": cap, "Approved (Rs.)": approved,
             "Deduction (Rs.)": deduction, "Flag": "⚠️ Over DSIC cap" if deduction > 0 else "✅ Within cap",
-        })
-
-    if rental_dates:
-        rental_cap = 6000.0
-        rental_approved = round(min(rental_claimed, rental_cap), 2)
-        rental_deduction = round(max(rental_claimed - rental_cap, 0.0), 2)
-        rows.append({
-            "Date": f"{rental_dates[0]} to {rental_dates[-1]}", "Tour Day": "26+", "Bracket": "26+ Days (Rental, lump-sum)",
-            "Claimed (Rs.)": round(rental_claimed, 2), "Cap (Rs.)": f"<= {rental_cap:.0f} (whole bracket)",
-            "Approved (Rs.)": rental_approved, "Deduction (Rs.)": rental_deduction,
-            "Flag": "⚠️ Over Rental cap — manual RA verification recommended" if rental_deduction > 0 else "✅ Within Rental cap",
         })
 
     return pd.DataFrame(rows)
@@ -747,11 +805,25 @@ if dsic_active:
 
     tour_span_days = (end_dt.date() - start_dt.date()).days + 1 if (start_dt and end_dt) else None
     tier_source_note = "manually set" if manual_dsic_tier_override else f"auto-mapped from Category {slab['category']}"
+    lodging_days_preview = expense_df[expense_df["Bucket"] == "Lodging(Hotel)"]["Date"].nunique()
+    conveyance_days_preview = expense_df[expense_df["Bucket"] == "Conveyance(Local)"]["Date"].nunique()
+
+    if lodging_days_preview > RENTAL_BRACKET_DAYS or conveyance_days_preview > RENTAL_BRACKET_DAYS:
+        mode_note = (
+            f"Lodging claimed on **{lodging_days_preview} day(s)** and Conveyance on **{conveyance_days_preview} day(s)** — "
+            f"since this exceeds the tabulated 30-day range, the tiered day-brackets are **not** used. Instead a flat "
+            f"per-day-equivalent rate is applied across the WHOLE claim: Lodging @ ₹{RENTAL_LODGING_PER_DAY:.2f}/day "
+            f"(= 10000 ÷ 30) and Conveyance @ ₹{RENTAL_CONVEYANCE_PER_DAY:.2f}/day (= 6000 ÷ 30)."
+        )
+    else:
+        mode_note = (
+            "Rates step down as the tour progresses through the tiered day-brackets "
+            f"(Day 1-5, 6-12, 13-25, then Rental from Day 26) using **Tier {dsic_tier + 1} of 3** ({tier_source_note})."
+        )
+
     st.warning(
         f"🔧 **DSIC Engineer Tour Detected** — Department: {header_info.get('Employee Department')}. "
-        f"Per TE Rules Note 3, Lodging & Conveyance are audited under the **DSIC day-bracket table** "
-        f"(rates step down as the tour progresses — Day 1-5, 6-12, 13-25, then a lump-sum Rental bracket "
-        f"from Day 26 onward), using **Tier {dsic_tier + 1} of 3** ({tier_source_note}). "
+        f"Per TE Rules Note 3, Lodging & Conveyance are audited under the DSIC table. {mode_note} "
         f"Tour spans **{tour_span_days if tour_span_days else '—'} day(s)**. "
         f"Boarding stays on the general table (₹{boarding_cap}/day) — Note 3 does not revise Boarding."
     )
