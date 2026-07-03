@@ -59,14 +59,14 @@ SLAB_TABLE = [
      "caps": {"Metro": (900, 415), "State Capital": (800, 390), "Other": (700, 390)}},
     {"category": 3, "name": "Sr. Executive / Asst. Team Lead / Asst. Engineer",
      "keywords": ["sr. executive", "senior executive", "asst. team lead", "assistant team lead",
-                  "asst. engineer", "assistant engineer"],
+                  "asstt. team lead", "asst. engineer", "assistant engineer", "asstt. engineer"],
      "caps": {"Metro": (950, 475), "State Capital": (850, 450), "Other": (750, 450)}},
     {"category": 4, "name": "Team Lead / Sr. Team Lead / Engineer / Sr. Engineer",
      "keywords": ["sr. team lead", "senior team lead", "team lead", "sr. engineer",
                   "senior engineer", "engineer"],
      "caps": {"Metro": (1050, 510), "State Capital": (950, 485), "Other": (850, 485)}},
     {"category": 5, "name": "Asst. Managers / Deputy Managers",
-     "keywords": ["asst. manager", "assistant manager", "deputy manager"],
+     "keywords": ["asst. manager", "assistant manager", "asstt. manager", "deputy manager"],
      "caps": {"Metro": (1200, 550), "State Capital": (1100, 525), "Other": (1000, 525)}},
     {"category": 6, "name": "Managers / Sr. Managers",
      "keywords": ["sr. manager", "senior manager", "manager"],
@@ -104,6 +104,50 @@ AMOUNT_PATTERN = re.compile(r"\d+\.\d{2}")
 DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
 HEADER_DATE_FMT = "%d/%m/%Y %H:%M:%S"
 
+# ----------------------------------------------------------------------
+# DSIC ENGINEERS — Revised Lodging & Conveyance (TE Rules Note 3, applicable
+# from 01-Jan-2023). This REPLACES the general Metro/State-Capital/Other
+# Lodging & Conveyance caps for employees on DSIC tours; Boarding is NOT
+# revised by this note and continues to use the general designation table.
+# Each day-bracket lists 3 tiers (highest to lowest); the policy text does
+# not explicitly label which designation maps to which tier, so this app
+# maps them onto the same seniority ordering used by the general table:
+#   Tier 0 (highest) -> Category 4 and above (Team Lead / Engineer and up)
+#   Tier 1 (middle)   -> Category 3 (Sr. Executive / Asst. Team Lead / Asst. Engineer)
+#   Tier 2 (lowest)   -> Category 1-2 (Workmen / Trainee / Jr. roles)
+# This mapping is a reasonable assumption, not stated verbatim in the policy
+# text - it is shown in the UI so it can be verified or overridden.
+DSIC_BRACKETS = [
+    {"label": "0-5 Days", "min_days": 0, "max_days": 5,
+     "lodging_tiers": [950, 850, 750], "conveyance_tiers": ["Actuals", "Actuals", "Actuals"]},
+    {"label": "06-12 Days", "min_days": 6, "max_days": 12,
+     "lodging_tiers": [800, 700, 600], "conveyance_tiers": [300, 250, 250]},
+    {"label": "13-25 Days", "min_days": 13, "max_days": 25,
+     "lodging_tiers": [600, 500, 400], "conveyance_tiers": [300, 250, 250]},
+    {"label": "26-30 Days", "min_days": 26, "max_days": 30,
+     "lodging_tiers": ["Rental <= 10000", "Rental <= 10000", "Rental <= 10000"],
+     "conveyance_tiers": ["Rental <= 6000", "Rental <= 6000", "Rental <= 6000"]},
+]
+
+
+def dsic_tier_index(category_num):
+    if category_num >= 4:
+        return 0
+    if category_num == 3:
+        return 1
+    return 2
+
+
+def get_dsic_bracket_for_day(day_number):
+    """DSIC rates step DOWN as the tour progresses. day_number is the elapsed
+    day of the tour (Day 1 = tour Start Date). Any day beyond 30 continues
+    under the same 26-30 Rental bracket, since the policy text does not
+    define anything past day 30 - this is an assumption, flagged in the UI."""
+    for bracket in DSIC_BRACKETS:
+        if bracket["min_days"] <= day_number <= bracket["max_days"]:
+            return bracket
+    return DSIC_BRACKETS[-1]  # day 31+ -> continue the 26-30 Rental bracket
+
 
 # ----------------------------------------------------------------------
 # SIDEBAR — POLICY REFERENCE + OVERRIDES
@@ -125,6 +169,11 @@ with st.sidebar:
             [f"Category {s['category']}: {s['name']}" for s in SLAB_TABLE],
         )
     st.markdown("---")
+    manual_dsic_tier_override = st.checkbox("Manually override DSIC Tier (if applicable)", value=False)
+    manual_dsic_tier = None
+    if manual_dsic_tier_override:
+        manual_dsic_tier = st.selectbox("DSIC Rate Tier", ["Tier 1 (highest)", "Tier 2 (middle)", "Tier 3 (lowest)"], index=1)
+    st.markdown("---")
     with st.expander("📖 TE Rules Reference (w.e.f. 1-Apr-2025)"):
         ref_rows = []
         for s in SLAB_TABLE:
@@ -134,6 +183,17 @@ with st.sidebar:
                 "Boarding (Metro/StateCap/Other)": f"{s['caps']['Metro'][1]} / {s['caps']['State Capital'][1]} / {s['caps']['Other'][1]}",
             })
         st.dataframe(pd.DataFrame(ref_rows), use_container_width=True, hide_index=True)
+
+        st.markdown("**DSIC Engineers — Revised Lodging & Conveyance (Note 3)**")
+        dsic_ref_rows = []
+        for b in DSIC_BRACKETS:
+            dsic_ref_rows.append({
+                "Tour Duration": b["label"],
+                "Lodging Tiers (Rs./day)": " / ".join(str(v) for v in b["lodging_tiers"]),
+                "Conveyance Tiers (Rs./day)": " / ".join(str(v) for v in b["conveyance_tiers"]),
+            })
+        st.dataframe(pd.DataFrame(dsic_ref_rows), use_container_width=True, hide_index=True)
+        st.caption("Tiers are ordered highest→lowest; this app maps Category 4+ → Tier 1, Category 3 → Tier 2, Category 1-2 → Tier 3 (assumption, not explicitly labeled in the policy text). Boarding is unaffected by this note.")
 
 
 # ----------------------------------------------------------------------
@@ -173,12 +233,14 @@ def match_designation_slab(designation_text):
     return None
 
 
-def auto_detect_place_category(place_names, header_text):
-    """Check the tour's place names (line items + header 'Place Visited' text)
-    against the Metro / State Capital reference lists. Metro takes priority
+def auto_detect_place_category(place_names):
+    """Check the tour's ACTUAL per-line-item place names (where the expenses
+    really happened) against the Metro / State Capital reference lists.
+    Deliberately does NOT use the header's 'Place Visited' text - that field
+    can be a stale/generic tour-destination label that doesn't match where
+    daily Lodging/Boarding/Conveyance actually occurred. Metro takes priority
     over State Capital if both appear; defaults to 'Other' if nothing matches."""
-    combined_text = " ".join([p for p in place_names if p]) + " " + (header_text or "")
-    combined_lower = combined_text.lower()
+    combined_lower = " ".join([p for p in place_names if p]).lower()
 
     matched_metro = [city for city in METRO_CITIES if re.search(r"\b" + re.escape(city.lower()) + r"\b", combined_lower)]
     if matched_metro:
@@ -191,12 +253,19 @@ def auto_detect_place_category(place_names, header_text):
     return "Other", []
 
 
+def is_dsic_tour(header_info):
+    dept = (header_info.get("Employee Department") or "").lower()
+    full_text = (header_info.get("_full_text") or "").lower()
+    return "dsic" in dept or "dsic" in full_text
+
+
 def parse_header_info(full_text):
     info = {}
     patterns = {
         "Tour No": r"Tour No\.\s*([A-Za-z0-9/\-]+)",
         "Employee Name": r"Employee Name:\s*([A-Za-z .]+?)\s+Employee ID",
         "Employee ID": r"Employee ID:\s*(\S+)",
+        "Employee Department": r"Employee Department:\s*(\S+)",
         "Designation": r"Designation:\s*([A-Za-z.() ]+?)\s+Days",
         "Start Date Raw": r"Start Date:\s*([\d/]+\s+[\d:]+)",
         "End Date Raw": r"End Date:\s*([\d/]+\s+[\d:]+)",
@@ -436,6 +505,8 @@ def audit_lodging(df_bucket, daily_cap, start_dt, end_dt):
 
         if out_of_range:
             approved, deduction, flag = 0.0, claimed, "⛔ Outside tour date range — NOT approved"
+        elif isinstance(daily_cap, str) and daily_cap.startswith("Rental"):
+            approved, deduction, flag = claimed, 0.0, f"⚠️ {daily_cap} (lump-sum for whole tour, not per day) — manual RA review recommended"
         elif isinstance(daily_cap, str):
             approved, deduction, flag = claimed, 0.0, "On actuals (Director slab)"
         else:
@@ -451,6 +522,128 @@ def audit_lodging(df_bucket, daily_cap, start_dt, end_dt):
 
     actual_nights = df_bucket["Date"].nunique()
     return pd.DataFrame(rows), actual_nights, expected_nights
+
+
+def audit_lodging_dsic(df_bucket, start_dt, end_dt, tier_index):
+    """DSIC Lodging: cap steps down per elapsed tour-day bracket. Days falling
+    in the 26-30+ bracket are pooled and capped as ONE lump-sum Rental amount
+    (that bracket is a monthly-rental style arrangement, not a per-night rate)."""
+    rows = []
+    if df_bucket.empty or start_dt is None:
+        return pd.DataFrame(rows), 0, None
+
+    start_date = start_dt.date()
+    end_date = end_dt.date() if end_dt else None
+    expected_nights = (end_date - start_date).days if end_date else None
+
+    rental_claimed = 0.0
+    rental_dates = []
+
+    for date_str, group in df_bucket.groupby("Date", sort=True):
+        claimed = round(group["Claimed Amount"].sum(), 2)
+        try:
+            this_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if end_date and (this_date < start_date or this_date > end_date):
+            rows.append({"Date": date_str, "Tour Day": "-", "Bracket": "-", "Claimed (Rs.)": claimed,
+                         "Cap (Rs.)": "-", "Approved (Rs.)": 0.0, "Deduction (Rs.)": claimed,
+                         "Flag": "⛔ Outside tour date range — NOT approved"})
+            continue
+
+        day_number = (this_date - start_date).days + 1
+        bracket = get_dsic_bracket_for_day(day_number)
+        cap = bracket["lodging_tiers"][tier_index]
+
+        if isinstance(cap, str):  # Rental bracket -> pool for lump-sum handling below
+            rental_claimed += claimed
+            rental_dates.append(date_str)
+            continue
+
+        approved = round(min(claimed, cap), 2)
+        deduction = round(max(claimed - cap, 0.0), 2)
+        rows.append({
+            "Date": date_str, "Tour Day": day_number, "Bracket": bracket["label"],
+            "Claimed (Rs.)": claimed, "Cap (Rs.)": cap, "Approved (Rs.)": approved,
+            "Deduction (Rs.)": deduction, "Flag": "⚠️ Over DSIC cap" if deduction > 0 else "✅ Within cap",
+        })
+
+    if rental_dates:
+        rental_cap = 10000.0
+        rental_approved = round(min(rental_claimed, rental_cap), 2)
+        rental_deduction = round(max(rental_claimed - rental_cap, 0.0), 2)
+        rows.append({
+            "Date": f"{rental_dates[0]} to {rental_dates[-1]}", "Tour Day": "26+", "Bracket": "26+ Days (Rental, lump-sum)",
+            "Claimed (Rs.)": round(rental_claimed, 2), "Cap (Rs.)": f"<= {rental_cap:.0f} (whole bracket)",
+            "Approved (Rs.)": rental_approved, "Deduction (Rs.)": rental_deduction,
+            "Flag": "⚠️ Over Rental cap — manual RA verification recommended" if rental_deduction > 0 else "✅ Within Rental cap",
+        })
+
+    actual_nights = df_bucket["Date"].nunique()
+    return pd.DataFrame(rows), actual_nights, expected_nights
+
+
+def audit_conveyance_dsic(df_bucket, start_dt, end_dt, tier_index):
+    """DSIC Conveyance: Days 0-5 are on actuals (uncapped); Days 6-25 have a
+    daily cap; Days 26+ are pooled into ONE lump-sum Rental cap for the whole
+    tail of the tour, same logic as Lodging."""
+    rows = []
+    if df_bucket.empty or start_dt is None:
+        return pd.DataFrame(rows)
+
+    start_date = start_dt.date()
+    end_date = end_dt.date() if end_dt else None
+
+    rental_claimed = 0.0
+    rental_dates = []
+
+    for date_str, group in df_bucket.groupby("Date", sort=True):
+        claimed = round(group["Claimed Amount"].sum(), 2)
+        try:
+            this_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if end_date and (this_date < start_date or this_date > end_date):
+            rows.append({"Date": date_str, "Tour Day": "-", "Bracket": "-", "Claimed (Rs.)": claimed,
+                         "Cap (Rs.)": "-", "Approved (Rs.)": 0.0, "Deduction (Rs.)": claimed,
+                         "Flag": "⛔ Outside tour date range — NOT approved"})
+            continue
+
+        day_number = (this_date - start_date).days + 1
+        bracket = get_dsic_bracket_for_day(day_number)
+        cap = bracket["conveyance_tiers"][tier_index]
+
+        if isinstance(cap, str) and cap.startswith("Rental"):
+            rental_claimed += claimed
+            rental_dates.append(date_str)
+            continue
+
+        if cap == "Actuals":
+            rows.append({"Date": date_str, "Tour Day": day_number, "Bracket": bracket["label"],
+                         "Claimed (Rs.)": claimed, "Cap (Rs.)": "Actuals", "Approved (Rs.)": claimed,
+                         "Deduction (Rs.)": 0.0, "Flag": "✅ On actuals (Day 0-5)"})
+            continue
+
+        approved = round(min(claimed, cap), 2)
+        deduction = round(max(claimed - cap, 0.0), 2)
+        rows.append({
+            "Date": date_str, "Tour Day": day_number, "Bracket": bracket["label"],
+            "Claimed (Rs.)": claimed, "Cap (Rs.)": cap, "Approved (Rs.)": approved,
+            "Deduction (Rs.)": deduction, "Flag": "⚠️ Over DSIC cap" if deduction > 0 else "✅ Within cap",
+        })
+
+    if rental_dates:
+        rental_cap = 6000.0
+        rental_approved = round(min(rental_claimed, rental_cap), 2)
+        rental_deduction = round(max(rental_claimed - rental_cap, 0.0), 2)
+        rows.append({
+            "Date": f"{rental_dates[0]} to {rental_dates[-1]}", "Tour Day": "26+", "Bracket": "26+ Days (Rental, lump-sum)",
+            "Claimed (Rs.)": round(rental_claimed, 2), "Cap (Rs.)": f"<= {rental_cap:.0f} (whole bracket)",
+            "Approved (Rs.)": rental_approved, "Deduction (Rs.)": rental_deduction,
+            "Flag": "⚠️ Over Rental cap — manual RA verification recommended" if rental_deduction > 0 else "✅ Within Rental cap",
+        })
+
+    return pd.DataFrame(rows)
 
 
 def audit_actuals(df_bucket, start_dt, end_dt):
@@ -502,11 +695,12 @@ if expense_df.empty:
 
 # ---------------------- Header card ----------------------
 st.subheader("🗂️ Tour Information")
-h1, h2, h3, h4 = st.columns(4)
+h1, h2, h3, h4, h5 = st.columns(5)
 h1.metric("Tour No.", header_info.get("Tour No") or "—")
 h2.metric("Employee", header_info.get("Employee Name") or "—")
 h3.metric("Designation", header_info.get("Designation") or "—")
 h4.metric("Days", header_info.get("Days") or "—")
+h5.metric("Department", header_info.get("Employee Department") or "—")
 
 start_dt = header_info.get("Start Date")
 end_dt = header_info.get("End Date")
@@ -527,7 +721,7 @@ if slab is None:
 
 # ---------------------- Place Category auto-detection ----------------------
 detected_place_category, matched_place_names = auto_detect_place_category(
-    expense_df["Place"].dropna().unique().tolist(), header_info.get("_full_text")
+    expense_df["Place"].dropna().unique().tolist()
 )
 if manual_place_override and manual_place_category:
     place_category = manual_place_category
@@ -540,10 +734,33 @@ else:
         st.caption(f"📍 Place Category auto-detected as **{place_category}** (no Metro/State Capital name found among tour places — default applied).")
 
 lodging_cap, boarding_cap = slab["caps"][place_category]
+
+# ---------------------- DSIC override (Note 3: Revised Lodging & Conveyance) ----------------------
+dsic_active = is_dsic_tour(header_info)
+dsic_tier = None
+
+if dsic_active:
+    if manual_dsic_tier_override and manual_dsic_tier:
+        dsic_tier = {"Tier 1 (highest)": 0, "Tier 2 (middle)": 1, "Tier 3 (lowest)": 2}[manual_dsic_tier]
+    else:
+        dsic_tier = dsic_tier_index(slab["category"])
+
+    tour_span_days = (end_dt.date() - start_dt.date()).days + 1 if (start_dt and end_dt) else None
+    tier_source_note = "manually set" if manual_dsic_tier_override else f"auto-mapped from Category {slab['category']}"
+    st.warning(
+        f"🔧 **DSIC Engineer Tour Detected** — Department: {header_info.get('Employee Department')}. "
+        f"Per TE Rules Note 3, Lodging & Conveyance are audited under the **DSIC day-bracket table** "
+        f"(rates step down as the tour progresses — Day 1-5, 6-12, 13-25, then a lump-sum Rental bracket "
+        f"from Day 26 onward), using **Tier {dsic_tier + 1} of 3** ({tier_source_note}). "
+        f"Tour spans **{tour_span_days if tour_span_days else '—'} day(s)**. "
+        f"Boarding stays on the general table (₹{boarding_cap}/day) — Note 3 does not revise Boarding."
+    )
+
 st.success(
     f"**Policy Slab Detected:** Category {slab['category']} — {slab['name']}  |  "
     f"**Place Category:** {place_category}  |  "
-    f"**Lodging Cap:** ₹{lodging_cap}/night  |  **Boarding Cap:** ₹{boarding_cap}/day"
+    f"**Lodging/Conveyance Basis:** {'DSIC day-bracket table (see warning above)' if dsic_active else ('₹' + str(lodging_cap) + '/night')}  |  "
+    f"**Boarding Cap:** ₹{boarding_cap}/day"
 )
 
 st.divider()
@@ -556,16 +773,26 @@ df_ticket = expense_df[expense_df["Bucket"] == "Travel Ticket"].copy()
 
 # ---------------------- Run policy engine ----------------------
 boarding_day_summary = audit_boarding(df_boarding, boarding_cap, start_dt, end_dt)
-lodging_day_summary, lodging_actual_nights, lodging_expected_nights = audit_lodging(df_lodging, lodging_cap, start_dt, end_dt)
-conveyance_detail = audit_actuals(df_conveyance, start_dt, end_dt)
 ticket_detail = audit_actuals(df_ticket, start_dt, end_dt)
+
+if dsic_active:
+    lodging_day_summary, lodging_actual_nights, lodging_expected_nights = audit_lodging_dsic(df_lodging, start_dt, end_dt, dsic_tier)
+    conveyance_day_summary = audit_conveyance_dsic(df_conveyance, start_dt, end_dt, dsic_tier)
+    conveyance_detail = audit_actuals(df_conveyance, start_dt, end_dt)  # per-row detail, always shown for traceability
+else:
+    lodging_day_summary, lodging_actual_nights, lodging_expected_nights = audit_lodging(df_lodging, lodging_cap, start_dt, end_dt)
+    conveyance_detail = audit_actuals(df_conveyance, start_dt, end_dt)
+    conveyance_day_summary = pd.DataFrame()
 
 boarding_claimed = round(df_boarding["Claimed Amount"].sum(), 2) if not df_boarding.empty else 0.0
 boarding_approved = round(boarding_day_summary["Approved (Rs.)"].sum(), 2) if not boarding_day_summary.empty else 0.0
 lodging_claimed = round(df_lodging["Claimed Amount"].sum(), 2) if not df_lodging.empty else 0.0
 lodging_approved = round(lodging_day_summary["Approved (Rs.)"].sum(), 2) if not lodging_day_summary.empty else 0.0
 conveyance_claimed = round(conveyance_detail["Claimed Amount"].sum(), 2) if not conveyance_detail.empty else 0.0
-conveyance_approved = round(conveyance_detail["Approved Amount"].sum(), 2) if not conveyance_detail.empty else 0.0
+if dsic_active and not conveyance_day_summary.empty:
+    conveyance_approved = round(conveyance_day_summary["Approved (Rs.)"].sum(), 2)
+else:
+    conveyance_approved = round(conveyance_detail["Approved Amount"].sum(), 2) if not conveyance_detail.empty else 0.0
 ticket_claimed = round(ticket_detail["Claimed Amount"].sum(), 2) if not ticket_detail.empty else 0.0
 ticket_approved = round(ticket_detail["Approved Amount"].sum(), 2) if not ticket_detail.empty else 0.0
 
@@ -593,6 +820,9 @@ st.subheader("📝 Easy Summary")
 verdict_lines = []
 
 verdict_lines.append(f"- Designation **{header_info.get('Designation') or '—'}** → Policy **Category {slab['category']}** ({slab['name']}), Place Category treated as **{place_category}**.")
+
+if dsic_active:
+    verdict_lines.append(f"- 🔧 **DSIC tour** — Lodging/Conveyance audited under TE Rules Note 3's day-bracket table (Tier {dsic_tier + 1} of 3), stepping down as the tour progresses; Boarding still uses the general table.")
 
 all_dates_ok = True
 if start_dt and end_dt:
@@ -628,7 +858,12 @@ if not lodging_day_summary.empty:
         verdict_lines.append(f"- ⚠️ Lodging(Hotel): claimed ₹{lodging_claimed} vs approved ₹{lodging_approved} — amounts above cap were deducted.{nights_note}")
 
 if not conveyance_detail.empty:
-    verdict_lines.append(f"- ✅ Conveyance(Local): {len(df_conveyance)} trip(s) approved on actuals (Taxi/Auto), total ₹{conveyance_approved}.")
+    if dsic_active and conveyance_claimed != conveyance_approved:
+        verdict_lines.append(f"- ⚠️ Conveyance(Local): {len(df_conveyance)} trip(s), claimed ₹{conveyance_claimed} vs DSIC-capped approved ₹{conveyance_approved} — see day-wise table for which dates were over the cap.")
+    elif dsic_active:
+        verdict_lines.append(f"- ✅ Conveyance(Local): {len(df_conveyance)} trip(s), all within the DSIC day-bracket conveyance caps, total ₹{conveyance_approved}.")
+    else:
+        verdict_lines.append(f"- ✅ Conveyance(Local): {len(df_conveyance)} trip(s) approved on actuals (Taxi/Auto), total ₹{conveyance_approved}.")
 if not ticket_detail.empty:
     verdict_lines.append(f"- ✅ Travel Ticket: {len(df_ticket)} ticket(s) approved on actuals, total ₹{ticket_approved}.")
 elif df_ticket.empty:
@@ -649,8 +884,14 @@ with col_a:
     else:
         st.caption("No boarding/food line items found.")
 
-    st.markdown("**Conveyance(Local) — Actuals**")
-    if not conveyance_detail.empty:
+    st.markdown("**Conveyance(Local) — Actuals**" if not dsic_active else "**Conveyance(Local) — DSIC Day-wise Cap Application**")
+    if dsic_active and not conveyance_day_summary.empty:
+        st.dataframe(conveyance_day_summary, use_container_width=True, hide_index=True)
+        with st.expander("View individual conveyance line items"):
+            if not conveyance_detail.empty:
+                st.dataframe(conveyance_detail[["Date", "Place", "Claimed Amount", "Distance (Km)"]],
+                             use_container_width=True, hide_index=True)
+    elif not conveyance_detail.empty:
         st.dataframe(conveyance_detail[["Date", "Place", "Claimed Amount", "Approved Amount", "Distance (Km)"]],
                      use_container_width=True, hide_index=True)
     else:
