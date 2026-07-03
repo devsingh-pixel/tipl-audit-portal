@@ -95,10 +95,20 @@ STATE_CAPITALS = [
 
 CATEGORY_KEYWORDS = {
     "Boarding(Food)": ["boarding", "food"],
+    "Lodging(Relative)": ["relative"],
     "Lodging(Hotel)": ["lodging", "hotel"],
     "Conveyance(Local)": ["conveyance", "taxi", "auto"],
     "Travel Ticket": ["travel ticket", "ticket", "train", "rail"],
 }
+
+# TE Rules I.11 "Minimum Lodging": when an employee stays with a relative
+# instead of a Hotel/Guest House, Lodging is capped at 40% of the applicable
+# maximum daily Lodging rate, subject to an overall ceiling of Rs. 400/day.
+# This uses the GENERAL designation-table Lodging cap (Metro/State Capital/
+# Other), even on a DSIC tour - Note 3 only revises the Hotel lodging rate,
+# not this separate no-hotel/relative provision.
+LODGING_RELATIVE_PERCENT = 0.40
+LODGING_RELATIVE_MAX_CAP = 400
 
 AMOUNT_PATTERN = re.compile(r"\d+\.\d{2}")
 DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
@@ -211,12 +221,19 @@ with st.sidebar:
 # HELPERS
 # ----------------------------------------------------------------------
 def classify_line(text_lower):
-    """Classify by the EARLIEST-occurring category keyword in the text.
-    This matters because free-text remarks can contain a rival keyword later
+    """Classify by the EARLIEST-occurring category keyword in the text, with
+    one override: 'relative' always wins over the generic 'lodging'/'hotel'
+    keywords, because a Lodging(Relative) row's text still literally contains
+    the word 'lodging' (e.g. 'Lodging(Relative)Lodging 300.00') earlier in
+    the string than the word 'relative' - a plain earliest-position scan
+    would otherwise misclassify it as Lodging(Hotel).
+    Beyond that override, free-text remarks can contain a rival keyword later
     in the string (e.g. a Conveyance remark 'Hotel to BSP Plant' contains the
-    word 'hotel' - but the real Expense Type keyword 'conveyance' always sits
-    at the very start of the row, before any remark text, so earliest-position
-    wins rather than a fixed Boarding->Lodging->Conveyance->Ticket scan order)."""
+    word 'hotel') - the real Expense Type keyword always sits at the very
+    start of the row, before any remark text, so earliest-position wins
+    rather than a fixed Boarding->Lodging->Conveyance->Ticket scan order."""
+    if "relative" in text_lower:
+        return "Lodging(Relative)"
     best_pos = None
     best_bucket = None
     for bucket, keywords in CATEGORY_KEYWORDS.items():
@@ -542,6 +559,53 @@ def audit_lodging(df_bucket, daily_cap, start_dt, end_dt):
     return pd.DataFrame(rows), actual_nights, expected_nights
 
 
+def audit_lodging_relative(df_bucket, general_lodging_cap, start_dt, end_dt):
+    """TE Rules I.11 Minimum Lodging: 40% of the applicable GENERAL max
+    Lodging rate per day, subject to an overall ceiling of Rs. 400/day.
+    Always uses the general designation-table Lodging cap, even on DSIC
+    tours (Note 3 does not revise this no-hotel/relative provision)."""
+    rows = []
+    if df_bucket.empty:
+        return pd.DataFrame(rows), 0
+
+    start_date = start_dt.date() if start_dt else None
+    end_date = end_dt.date() if end_dt else None
+
+    if isinstance(general_lodging_cap, str):  # Director slab -> Actuals, no % cap applies
+        day_cap = "Actuals"
+    else:
+        day_cap = round(min(general_lodging_cap * LODGING_RELATIVE_PERCENT, LODGING_RELATIVE_MAX_CAP), 2)
+
+    for date_str, group in df_bucket.groupby("Date", sort=True):
+        claimed = round(group["Claimed Amount"].sum(), 2)
+        try:
+            this_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            this_date = None
+
+        out_of_range = False
+        if start_date and end_date and this_date:
+            out_of_range = this_date < start_date or this_date > end_date
+
+        if out_of_range:
+            approved, deduction, flag = 0.0, claimed, "⛔ Outside tour date range — NOT approved"
+        elif day_cap == "Actuals":
+            approved, deduction, flag = claimed, 0.0, "On actuals (Director slab)"
+        else:
+            approved = round(min(claimed, day_cap), 2)
+            deduction = round(max(claimed - day_cap, 0.0), 2)
+            flag = "⚠️ Over 40%-of-lodging / Rs.400 cap" if deduction > 0 else "✅ Within cap"
+
+        rows.append({
+            "Date": date_str, "Claimed (Rs.)": claimed,
+            "Cap (Rs.)": day_cap, "Approved (Rs.)": approved,
+            "Deduction (Rs.)": deduction, "Flag": flag,
+        })
+
+    actual_nights = df_bucket["Date"].nunique()
+    return pd.DataFrame(rows), actual_nights
+
+
 def audit_lodging_dsic(df_bucket, start_dt, end_dt, tier_index):
     """DSIC Lodging.
     - If total claimed Lodging days <= 30: cap steps down per elapsed
@@ -840,12 +904,14 @@ st.divider()
 # ---------------------- Split into buckets ----------------------
 df_boarding = expense_df[expense_df["Bucket"] == "Boarding(Food)"].copy()
 df_lodging = expense_df[expense_df["Bucket"] == "Lodging(Hotel)"].copy()
+df_lodging_relative = expense_df[expense_df["Bucket"] == "Lodging(Relative)"].copy()
 df_conveyance = expense_df[expense_df["Bucket"] == "Conveyance(Local)"].copy()
 df_ticket = expense_df[expense_df["Bucket"] == "Travel Ticket"].copy()
 
 # ---------------------- Run policy engine ----------------------
 boarding_day_summary = audit_boarding(df_boarding, boarding_cap, start_dt, end_dt)
 ticket_detail = audit_actuals(df_ticket, start_dt, end_dt)
+lodging_relative_day_summary, lodging_relative_nights = audit_lodging_relative(df_lodging_relative, lodging_cap, start_dt, end_dt)
 
 if dsic_active:
     lodging_day_summary, lodging_actual_nights, lodging_expected_nights = audit_lodging_dsic(df_lodging, start_dt, end_dt, dsic_tier)
@@ -860,6 +926,8 @@ boarding_claimed = round(df_boarding["Claimed Amount"].sum(), 2) if not df_board
 boarding_approved = round(boarding_day_summary["Approved (Rs.)"].sum(), 2) if not boarding_day_summary.empty else 0.0
 lodging_claimed = round(df_lodging["Claimed Amount"].sum(), 2) if not df_lodging.empty else 0.0
 lodging_approved = round(lodging_day_summary["Approved (Rs.)"].sum(), 2) if not lodging_day_summary.empty else 0.0
+lodging_relative_claimed = round(df_lodging_relative["Claimed Amount"].sum(), 2) if not df_lodging_relative.empty else 0.0
+lodging_relative_approved = round(lodging_relative_day_summary["Approved (Rs.)"].sum(), 2) if not lodging_relative_day_summary.empty else 0.0
 conveyance_claimed = round(conveyance_detail["Claimed Amount"].sum(), 2) if not conveyance_detail.empty else 0.0
 if dsic_active and not conveyance_day_summary.empty:
     conveyance_approved = round(conveyance_day_summary["Approved (Rs.)"].sum(), 2)
@@ -869,13 +937,21 @@ ticket_claimed = round(ticket_detail["Claimed Amount"].sum(), 2) if not ticket_d
 ticket_approved = round(ticket_detail["Approved Amount"].sum(), 2) if not ticket_detail.empty else 0.0
 
 # ---------------------- Summary table ----------------------
-summary_df = pd.DataFrame([
+summary_rows = [
     {"Expense Type": "Boarding(Food)", "Total Days / Units": df_boarding["Date"].nunique() if not df_boarding.empty else 0,
      "Total Claimed Amount (Rs.)": boarding_claimed, "Total Approved Amount (Rs.)": boarding_approved,
      "Verdict": "✅ Compliant" if boarding_claimed == boarding_approved else "⚠️ Deduction Applied"},
     {"Expense Type": "Lodging(Hotel)", "Total Days / Units": df_lodging["Date"].nunique() if not df_lodging.empty else 0,
      "Total Claimed Amount (Rs.)": lodging_claimed, "Total Approved Amount (Rs.)": lodging_approved,
      "Verdict": "✅ Compliant" if lodging_claimed == lodging_approved else "⚠️ Deduction Applied"},
+]
+if not df_lodging_relative.empty:
+    summary_rows.append(
+        {"Expense Type": "Lodging(Relative)", "Total Days / Units": df_lodging_relative["Date"].nunique(),
+         "Total Claimed Amount (Rs.)": lodging_relative_claimed, "Total Approved Amount (Rs.)": lodging_relative_approved,
+         "Verdict": "✅ Compliant" if lodging_relative_claimed == lodging_relative_approved else "⚠️ Deduction Applied"}
+    )
+summary_rows.extend([
     {"Expense Type": "Conveyance(Local)", "Total Days / Units": len(df_conveyance),
      "Total Claimed Amount (Rs.)": conveyance_claimed, "Total Approved Amount (Rs.)": conveyance_approved,
      "Verdict": "✅ Compliant" if conveyance_claimed == conveyance_approved else "⚠️ Deduction Applied"},
@@ -883,6 +959,7 @@ summary_df = pd.DataFrame([
      "Total Claimed Amount (Rs.)": ticket_claimed, "Total Approved Amount (Rs.)": ticket_approved,
      "Verdict": "✅ Compliant" if ticket_claimed == ticket_approved else "⚠️ Deduction Applied"},
 ])
+summary_df = pd.DataFrame(summary_rows)
 
 st.subheader("📊 Audit Summary by Expense Type")
 st.table(summary_df.style.format({"Total Claimed Amount (Rs.)": "{:.2f}", "Total Approved Amount (Rs.)": "{:.2f}"}))
@@ -924,10 +1001,18 @@ if not lodging_day_summary.empty:
             nights_note = f" Night count ({lodging_actual_nights}) matches expected nights for a {header_info.get('Days')}-day tour."
         else:
             nights_note = f" ⚠️ {lodging_actual_nights} night(s) claimed vs {lodging_expected_nights} expected for this tour duration — please verify."
+    lodging_cap_note = "the DSIC day-bracket / Rental-equivalent cap(s) (see table below)" if dsic_active else f"₹{lodging_cap}/night cap"
     if lodging_claimed == lodging_approved:
-        verdict_lines.append(f"- ✅ Lodging(Hotel): all nights within the ₹{lodging_cap}/night cap.{nights_note}")
+        verdict_lines.append(f"- ✅ Lodging(Hotel): all nights within {lodging_cap_note}.{nights_note}")
     else:
-        verdict_lines.append(f"- ⚠️ Lodging(Hotel): claimed ₹{lodging_claimed} vs approved ₹{lodging_approved} — amounts above cap were deducted.{nights_note}")
+        verdict_lines.append(f"- ⚠️ Lodging(Hotel): claimed ₹{lodging_claimed} vs approved ₹{lodging_approved} — amounts above {lodging_cap_note} were deducted.{nights_note}")
+
+if not df_lodging_relative.empty:
+    relative_cap_display = min(round(lodging_cap * LODGING_RELATIVE_PERCENT, 2), LODGING_RELATIVE_MAX_CAP) if not isinstance(lodging_cap, str) else "Actuals"
+    if lodging_relative_claimed == lodging_relative_approved:
+        verdict_lines.append(f"- ✅ Lodging(Relative): {lodging_relative_nights} night(s) staying with a relative, all within the 40%-of-lodging / ₹{LODGING_RELATIVE_MAX_CAP} cap (₹{relative_cap_display}/day here), total ₹{lodging_relative_approved}.")
+    else:
+        verdict_lines.append(f"- ⚠️ Lodging(Relative): claimed ₹{lodging_relative_claimed} vs approved ₹{lodging_relative_approved} — cap is 40% of the general lodging rate (max ₹{LODGING_RELATIVE_MAX_CAP}/day) = ₹{relative_cap_display}/day here.")
 
 if not conveyance_detail.empty:
     if dsic_active and conveyance_claimed != conveyance_approved:
@@ -976,6 +1061,10 @@ with col_b:
     else:
         st.caption("No lodging/hotel line items found.")
 
+    if not lodging_relative_day_summary.empty:
+        st.markdown("**Lodging(Relative) — 40% of General Lodging Cap (max Rs.400/day)**")
+        st.dataframe(lodging_relative_day_summary, use_container_width=True, hide_index=True)
+
     st.markdown("**Travel Ticket — Actuals**")
     if not ticket_detail.empty:
         st.dataframe(ticket_detail[["Date", "Place", "Claimed Amount", "Approved Amount"]],
@@ -998,6 +1087,7 @@ else:
     computed = pd.DataFrame([
         {"Bucket": "Boarding(Food)", "Expense Detail Claimed (Rs.)": boarding_claimed},
         {"Bucket": "Lodging(Hotel)", "Expense Detail Claimed (Rs.)": lodging_claimed},
+        {"Bucket": "Lodging(Relative)", "Expense Detail Claimed (Rs.)": lodging_relative_claimed},
         {"Bucket": "Conveyance(Local)", "Expense Detail Claimed (Rs.)": conveyance_claimed},
         {"Bucket": "Travel Ticket", "Expense Detail Claimed (Rs.)": ticket_claimed},
     ])
@@ -1012,8 +1102,8 @@ else:
 st.divider()
 
 # ---------------------- Grand totals ----------------------
-grand_claimed = round(boarding_claimed + lodging_claimed + conveyance_claimed + ticket_claimed, 2)
-grand_approved = round(boarding_approved + lodging_approved + conveyance_approved + ticket_approved, 2)
+grand_claimed = round(boarding_claimed + lodging_claimed + lodging_relative_claimed + conveyance_claimed + ticket_claimed, 2)
+grand_approved = round(boarding_approved + lodging_approved + lodging_relative_approved + conveyance_approved + ticket_approved, 2)
 grand_delta = round(grand_approved - grand_claimed, 2)
 
 st.subheader("🧮 Grand Total — Claimed vs Approved")
