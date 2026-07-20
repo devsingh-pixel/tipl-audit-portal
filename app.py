@@ -663,12 +663,14 @@ def audit_lodging_relative(df_bucket, general_lodging_cap, start_dt, end_dt):
 
 def audit_lodging_dsic(df_bucket, start_dt, end_dt, tier_index):
     """DSIC Lodging.
-    - If total claimed Lodging days <= 30: cap steps down per elapsed
-      tour-day bracket (0-5 / 6-12 / 13-25 / 26-30), as tabulated.
-    - If total claimed Lodging days > 30: the tiered brackets are NOT used.
-      Instead the Rental cap (Rs. 10000 for 30 days) is converted into a
-      per-day-equivalent rate (10000 / 30 = Rs. 333.33/day) and applied
-      UNIFORMLY across every claimed day of the whole tour."""
+    The bracket is chosen ONCE from the TOTAL number of Lodging nights
+    claimed on this tour (0-5 / 6-12 / 13-25 / 26-30 / 30+), and that single
+    flat per-night rate is then applied uniformly to EVERY night. This
+    matches how the >30-night Rental-equivalent case already worked - it is
+    a claim-level bracket, not a per-night progression based on calendar
+    elapsed time. e.g. 8 nights claimed -> falls in the "06-12" bracket ->
+    every night is capped at that bracket's rate (not a mix of 0-5/6-12
+    rates depending on which calendar day each night happened to fall on)."""
     rows = []
     if df_bucket.empty or start_dt is None:
         return pd.DataFrame(rows), 0, None
@@ -679,57 +681,35 @@ def audit_lodging_dsic(df_bucket, start_dt, end_dt, tier_index):
     total_lodging_days = df_bucket["Date"].nunique()
 
     if total_lodging_days > RENTAL_BRACKET_DAYS:
-        # Flat per-day-equivalent-of-Rental-cap mode across the WHOLE claim
-        per_day_cap = round(RENTAL_LODGING_PER_DAY, 2)
-        for date_str, group in df_bucket.groupby("Date", sort=True):
-            claimed = round(group["Claimed Amount"].sum(), 2)
-            try:
-                this_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            except ValueError:
-                continue
-            if end_date and (this_date < start_date or this_date > end_date):
-                rows.append({"Date": date_str, "Tour Day": "-", "Bracket": "-", "Claimed (Rs.)": claimed,
-                             "Cap (Rs.)": "-", "Approved (Rs.)": 0.0, "Deduction (Rs.)": claimed,
-                             "Flag": "⛔ Outside tour date range — NOT approved"})
-                continue
-            day_number = (this_date - start_date).days + 1
-            approved = round(min(claimed, per_day_cap), 2)
-            deduction = round(max(claimed - per_day_cap, 0.0), 2)
-            rows.append({
-                "Date": date_str, "Tour Day": day_number,
-                "Bracket": f">30 days total — flat Rental-equivalent rate (10000/30)",
-                "Claimed (Rs.)": claimed, "Cap (Rs.)": per_day_cap, "Approved (Rs.)": approved,
-                "Deduction (Rs.)": deduction, "Flag": "⚠️ Over DSIC Rental-equivalent rate" if deduction > 0 else "✅ Within cap",
-            })
-        return pd.DataFrame(rows), total_lodging_days, expected_nights
+        cap = round(RENTAL_LODGING_PER_DAY, 2)
+        bracket_label = f">{RENTAL_BRACKET_DAYS} nights total — flat Rental-equivalent rate (10000/30)"
+    else:
+        bracket = get_dsic_bracket_for_day(total_lodging_days)
+        raw_cap = bracket["lodging_tiers"][tier_index]
+        if isinstance(raw_cap, str):
+            cap = round(RENTAL_LODGING_PER_DAY, 2)
+            bracket_label = f"{bracket['label']} total ({total_lodging_days} nights) — Rental-equivalent (10000/30)"
+        else:
+            cap = raw_cap
+            bracket_label = f"{bracket['label']} total ({total_lodging_days} nights claimed)"
 
-    # Tiered day-bracket mode (tour total <= 30 days)
     for date_str, group in df_bucket.groupby("Date", sort=True):
         claimed = round(group["Claimed Amount"].sum(), 2)
         try:
             this_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
             continue
+
         if end_date and (this_date < start_date or this_date > end_date):
-            rows.append({"Date": date_str, "Tour Day": "-", "Bracket": "-", "Claimed (Rs.)": claimed,
+            rows.append({"Date": date_str, "Bracket": "-", "Claimed (Rs.)": claimed,
                          "Cap (Rs.)": "-", "Approved (Rs.)": 0.0, "Deduction (Rs.)": claimed,
                          "Flag": "⛔ Outside tour date range — NOT approved"})
             continue
 
-        day_number = (this_date - start_date).days + 1
-        bracket = get_dsic_bracket_for_day(day_number)
-        cap = bracket["lodging_tiers"][tier_index]
-
-        if isinstance(cap, str):
-            cap = round(RENTAL_LODGING_PER_DAY, 2)  # single day within a <=30-day tour's rental bracket
-            bracket_label = f"{bracket['label']} (Rental-equivalent, 10000/30)"
-        else:
-            bracket_label = bracket["label"]
-
         approved = round(min(claimed, cap), 2)
         deduction = round(max(claimed - cap, 0.0), 2)
         rows.append({
-            "Date": date_str, "Tour Day": day_number, "Bracket": bracket_label,
+            "Date": date_str, "Bracket": bracket_label,
             "Claimed (Rs.)": claimed, "Cap (Rs.)": cap, "Approved (Rs.)": approved,
             "Deduction (Rs.)": deduction, "Flag": "⚠️ Over DSIC cap" if deduction > 0 else "✅ Within cap",
         })
@@ -743,11 +723,11 @@ def audit_conveyance_dsic(df_bucket, start_dt, end_dt, tier_index):
     Any other same-day trip (material pickup, another location, a side
     errand, etc.) is always approved on actuals, uncapped, regardless of
     the DSIC bracket or tier.
-    - If total claimed Conveyance days <= 30: the commute portion follows
-      the tiered day-bracket cap (Days 0-5 actuals, Days 6-25 tiered cap).
-    - If total claimed Conveyance days > 30: the commute portion instead
-      uses a flat per-day-equivalent rate derived from the Rental cap
-      (6000 / 30 = Rs. 200/day), applied uniformly across every day."""
+    The bracket is chosen ONCE from the TOTAL number of Conveyance days
+    claimed on this tour (0-5 / 6-12 / 13-25 / 26-30 / 30+), and that single
+    flat per-day commute cap is then applied uniformly to every day's
+    commute portion - the same claim-level bracket logic used for Lodging,
+    not a per-day progression based on calendar elapsed time."""
     rows = []
     if df_bucket.empty or start_dt is None:
         return pd.DataFrame(rows)
@@ -755,7 +735,22 @@ def audit_conveyance_dsic(df_bucket, start_dt, end_dt, tier_index):
     start_date = start_dt.date()
     end_date = end_dt.date() if end_dt else None
     total_conveyance_days = df_bucket["Date"].nunique()
-    flat_rate_mode = total_conveyance_days > RENTAL_BRACKET_DAYS
+
+    if total_conveyance_days > RENTAL_BRACKET_DAYS:
+        cap = round(RENTAL_CONVEYANCE_PER_DAY, 2)
+        bracket_label = f">{RENTAL_BRACKET_DAYS} days total — flat Rental-equivalent rate (6000/30), commute only"
+    else:
+        bracket = get_dsic_bracket_for_day(total_conveyance_days)
+        raw_cap = bracket["conveyance_tiers"][tier_index]
+        if isinstance(raw_cap, str) and raw_cap.startswith("Rental"):
+            cap = round(RENTAL_CONVEYANCE_PER_DAY, 2)
+            bracket_label = f"{bracket['label']} total ({total_conveyance_days} days claimed) — Rental-equivalent (6000/30), commute only"
+        elif raw_cap == "Actuals":
+            cap = "Actuals"
+            bracket_label = f"{bracket['label']} total ({total_conveyance_days} days claimed) — commute on actuals"
+        else:
+            cap = raw_cap
+            bracket_label = f"{bracket['label']} total ({total_conveyance_days} days claimed), commute only"
 
     for date_str, group in df_bucket.groupby("Date", sort=True):
         claimed = round(group["Claimed Amount"].sum(), 2)
@@ -765,7 +760,7 @@ def audit_conveyance_dsic(df_bucket, start_dt, end_dt, tier_index):
             continue
 
         if end_date and (this_date < start_date or this_date > end_date):
-            rows.append({"Date": date_str, "Tour Day": "-", "Bracket": "-",
+            rows.append({"Date": date_str, "Bracket": "-",
                          "Commute Claimed (Rs.)": claimed, "Commute Cap (Rs.)": "-",
                          "Other Trips - Actuals (Rs.)": 0.0, "Total Claimed (Rs.)": claimed,
                          "Total Approved (Rs.)": 0.0, "Deduction (Rs.)": claimed,
@@ -775,22 +770,6 @@ def audit_conveyance_dsic(df_bucket, start_dt, end_dt, tier_index):
         is_commute = group["Raw Row"].apply(is_commute_trip) if "Raw Row" in group.columns else pd.Series([False] * len(group))
         commute_claimed = round(group.loc[is_commute, "Claimed Amount"].sum(), 2)
         other_claimed = round(group.loc[~is_commute, "Claimed Amount"].sum(), 2)
-
-        day_number = (this_date - start_date).days + 1
-
-        if flat_rate_mode:
-            cap = round(RENTAL_CONVEYANCE_PER_DAY, 2)
-            bracket_label = ">30 days total — flat Rental-equivalent rate (6000/30), commute only"
-        else:
-            bracket = get_dsic_bracket_for_day(day_number)
-            cap = bracket["conveyance_tiers"][tier_index]
-            if isinstance(cap, str) and cap.startswith("Rental"):
-                cap = round(RENTAL_CONVEYANCE_PER_DAY, 2)
-                bracket_label = f"{bracket['label']} (Rental-equivalent, 6000/30), commute only"
-            elif cap == "Actuals":
-                bracket_label = f"{bracket['label']} (commute on actuals)"
-            else:
-                bracket_label = f"{bracket['label']}, commute only"
 
         if cap == "Actuals":
             commute_approved = commute_claimed
@@ -802,9 +781,9 @@ def audit_conveyance_dsic(df_bucket, start_dt, end_dt, tier_index):
         deduction = round(total_claimed - total_approved, 2)
 
         rows.append({
-            "Date": date_str, "Tour Day": day_number, "Bracket": bracket_label,
+            "Date": date_str, "Bracket": bracket_label,
             "Commute Claimed (Rs.)": commute_claimed,
-            "Commute Cap (Rs.)": "Actuals" if cap == "Actuals" else cap,
+            "Commute Cap (Rs.)": cap,
             "Other Trips - Actuals (Rs.)": other_claimed,
             "Total Claimed (Rs.)": total_claimed, "Total Approved (Rs.)": total_approved,
             "Deduction (Rs.)": deduction,
@@ -1076,230 +1055,118 @@ def compute_audit(header_info, expense_df, jv_df, policy_params):
 
 
 def render_results(r, key_prefix):
-    """All the st.* display for ONE tour's computed results. Uses checkboxes
-    instead of nested st.expander (Streamlit disallows expanders-in-expanders,
-    and this already renders inside a per-tour expander)."""
+    """All the st.* display for ONE tour's computed results, matching the
+    company portal's own 'Expense Detail' page format: Information header,
+    then JV Detail (with added Days / AI Approved Amount columns, row
+    highlighted red wherever the AI-approved amount doesn't match TE Rules),
+    then Expenses Detail (amount highlighted red wherever a required bill
+    is missing). No separate summary/tabs - this mirrors show_expense.pdf."""
     header_info = r["header_info"]
     expense_df = r["expense_df"]
-    jv_df = r["jv_df"]
     slab = r["slab"]
     place_category = r["place_category"]
     dsic_active = r["dsic_active"]
     dsic_tier = r["dsic_tier"]
-    lodging_cap = r["lodging_cap"]
     boarding_cap = r["boarding_cap"]
     start_dt = header_info.get("Start Date")
     end_dt = header_info.get("End Date")
 
     df_boarding, df_lodging, df_lodging_relative = r["df_boarding"], r["df_lodging"], r["df_lodging_relative"]
     df_conveyance, df_ticket = r["df_conveyance"], r["df_ticket"]
-    boarding_day_summary, lodging_day_summary = r["boarding_day_summary"], r["lodging_day_summary"]
-    lodging_relative_day_summary = r["lodging_relative_day_summary"]
-    lodging_relative_nights = r["lodging_relative_nights"]
-    lodging_actual_nights, lodging_expected_nights = r["lodging_actual_nights"], r["lodging_expected_nights"]
-    conveyance_day_summary, conveyance_detail, ticket_detail = r["conveyance_day_summary"], r["conveyance_detail"], r["ticket_detail"]
     boarding_claimed, boarding_approved = r["boarding_claimed"], r["boarding_approved"]
     lodging_claimed, lodging_approved = r["lodging_claimed"], r["lodging_approved"]
     lodging_relative_claimed, lodging_relative_approved = r["lodging_relative_claimed"], r["lodging_relative_approved"]
     conveyance_claimed, conveyance_approved = r["conveyance_claimed"], r["conveyance_approved"]
     ticket_claimed, ticket_approved = r["ticket_claimed"], r["ticket_approved"]
-    summary_df, bill_table, route_table = r["summary_df"], r["bill_table"], r["route_table"]
     grand_claimed, grand_approved = r["grand_claimed"], r["grand_approved"]
 
-    # ---------------------- Header card ----------------------
-    st.subheader("🗂️ Tour Information")
+    # ---------------------- Header card (mirrors the portal's "Information" block) ----------------------
+    st.subheader("🗂️ Information")
     h1, h2, h3, h4, h5 = st.columns(5)
     h1.metric("Tour No.", header_info.get("Tour No") or "—")
     h2.metric("Employee", header_info.get("Employee Name") or "—")
     h3.metric("Designation", header_info.get("Designation") or "—")
     h4.metric("Days", header_info.get("Days") or "—")
     h5.metric("Department", header_info.get("Employee Department") or "—")
-
     d1, d2 = st.columns(2)
-    d1.info(f"**Tour Start:** {start_dt.strftime('%d-%b-%Y %I:%M %p') if start_dt else 'Not detected'}")
-    d2.info(f"**Tour End:** {end_dt.strftime('%d-%b-%Y %I:%M %p') if end_dt else 'Not detected'}")
-
-    if r.get("matched_place_names"):
-        st.caption(f"📍 Place Category auto-detected as **{r['detected_place_category']}** (matched: {', '.join(r['matched_place_names'])}).")
-    else:
-        st.caption(f"📍 Place Category: **{place_category}** (no Metro/State Capital name found among tour places — default applied unless overridden above).")
-
+    d1.info(f"**Start Date:** {start_dt.strftime('%d/%m/%Y %H:%M:%S') if start_dt else header_info.get('Start Date Raw', 'Not detected')}")
+    d2.info(f"**End Date:** {end_dt.strftime('%d/%m/%Y %H:%M:%S') if end_dt else header_info.get('End Date Raw', 'Not detected')}")
     if dsic_active:
-        lodging_days_preview = expense_df[expense_df["Bucket"] == "Lodging(Hotel)"]["Date"].nunique()
-        conveyance_days_preview = expense_df[expense_df["Bucket"] == "Conveyance(Local)"]["Date"].nunique()
-        if lodging_days_preview > RENTAL_BRACKET_DAYS or conveyance_days_preview > RENTAL_BRACKET_DAYS:
-            mode_note = (
-                f"Lodging claimed on **{lodging_days_preview} day(s)** and Conveyance on **{conveyance_days_preview} day(s)** — "
-                f"exceeds the tabulated 30-day range, so a flat per-day-equivalent rate applies across the WHOLE claim: "
-                f"Lodging @ ₹{RENTAL_LODGING_PER_DAY:.2f}/day, Conveyance @ ₹{RENTAL_CONVEYANCE_PER_DAY:.2f}/day."
-            )
-        else:
-            mode_note = f"Rates step down through the tiered day-brackets using **Tier {dsic_tier + 1} of 3**."
-        st.warning(
-            f"🔧 **DSIC Engineer Tour** — Department: {header_info.get('Employee Department')}. "
-            f"Lodging/Conveyance audited under TE Rules Note 3. {mode_note} "
-            f"Boarding stays on the general table (₹{boarding_cap}/day)."
+        st.caption(f"🔧 DSIC tour — Lodging/Conveyance audited under TE Rules Note 3 (Tier {dsic_tier + 1} of 3, {place_category}); Boarding uses the general table (₹{boarding_cap}/day).")
+
+    # ---------------------- JV Detail: Days + AI Approved Amount, red row on mismatch ----------------------
+    st.subheader("JV Detail")
+    st.caption("Row highlighted red = TE Rules Auto-Audit does not match the Applied Amount (a policy deduction was found).")
+
+    jv_rows = []
+    if not df_boarding.empty:
+        jv_rows.append({"Account Code": "3443", "Expense Type": "Boarding(Food)", "Days": df_boarding["Date"].nunique(),
+                         "Applied Amount": boarding_claimed, "AI Approved Amount": boarding_approved})
+    if not df_lodging.empty:
+        jv_rows.append({"Account Code": "3442", "Expense Type": "Lodging(Hotel)", "Days": df_lodging["Date"].nunique(),
+                         "Applied Amount": lodging_claimed, "AI Approved Amount": lodging_approved})
+    if not df_lodging_relative.empty:
+        jv_rows.append({"Account Code": "3442", "Expense Type": "Lodging(Relative)", "Days": df_lodging_relative["Date"].nunique(),
+                         "Applied Amount": lodging_relative_claimed, "AI Approved Amount": lodging_relative_approved})
+    if not df_conveyance.empty:
+        jv_rows.append({"Account Code": "3207/3505", "Expense Type": "Conveyance(Local)", "Days": df_conveyance["Date"].nunique(),
+                         "Applied Amount": conveyance_claimed, "AI Approved Amount": conveyance_approved})
+    if not df_ticket.empty:
+        jv_rows.append({"Account Code": "3441", "Expense Type": "Travel Ticket", "Days": len(df_ticket),
+                         "Applied Amount": ticket_claimed, "AI Approved Amount": ticket_approved})
+
+    jv_summary_df = pd.DataFrame(jv_rows)
+    if not jv_summary_df.empty:
+        jv_summary_df["TE Rules Check"] = jv_summary_df.apply(
+            lambda row: "✅ Matches TE Rules" if abs(row["Applied Amount"] - row["AI Approved Amount"]) < 0.01
+            else f"✕ Deduction ₹{row['Applied Amount'] - row['AI Approved Amount']:,.2f}",
+            axis=1,
         )
 
-    st.success(
-        f"**Policy Slab:** Category {slab['category']} — {slab['name']}  |  "
-        f"**Place Category:** {place_category}  |  "
-        f"**Lodging/Conveyance Basis:** {'DSIC day-bracket table' if dsic_active else ('₹' + str(lodging_cap) + '/night')}  |  "
-        f"**Boarding Cap:** ₹{boarding_cap}/day"
-    )
+        def _highlight_mismatch(row):
+            is_mismatch = abs(row["Applied Amount"] - row["AI Approved Amount"]) >= 0.01
+            return ["background-color: #fdecec; color: #6b2320" if is_mismatch else "" for _ in row]
 
-    tab_summary, tab_detail, tab_bills, tab_jv = st.tabs(
-        ["📊 Summary", "📁 Detailed Breakdown", "📎 Bill & Route Verification", "🔁 JV Reconciliation"]
-    )
-
-    with tab_summary:
-        st.subheader("📊 Audit Summary by Expense Type")
-        st.table(summary_df.style.format({"Total Claimed Amount (Rs.)": "{:.2f}", "Total Approved Amount (Rs.)": "{:.2f}"}))
-
-        st.subheader("📝 Easy Summary")
-        verdict_lines = [f"- Designation **{header_info.get('Designation') or '—'}** → Policy **Category {slab['category']}** ({slab['name']}), Place Category **{place_category}**."]
-
-        if dsic_active:
-            verdict_lines.append(f"- 🔧 **DSIC tour** — Lodging/Conveyance audited under TE Rules Note 3 (Tier {dsic_tier + 1} of 3); Boarding uses the general table.")
-
-        if start_dt and end_dt:
-            oob_boarding = boarding_day_summary[boarding_day_summary["Rule Applied"].astype(str).str.contains("Outside")] if not boarding_day_summary.empty else pd.DataFrame()
-            oob_lodging = lodging_day_summary[lodging_day_summary["Flag"].astype(str).str.contains("Outside")] if not lodging_day_summary.empty else pd.DataFrame()
-            oob_conv = conveyance_detail[conveyance_detail.get("Flag", pd.Series(dtype=str)).astype(str).str.contains("Outside")] if not conveyance_detail.empty else pd.DataFrame()
-            oob_ticket = ticket_detail[ticket_detail.get("Flag", pd.Series(dtype=str)).astype(str).str.contains("Outside")] if not ticket_detail.empty else pd.DataFrame()
-            total_oob = len(oob_boarding) + len(oob_lodging) + len(oob_conv) + len(oob_ticket)
-            if total_oob == 0:
-                verdict_lines.append(f"- ✅ All claim dates fall within the tour boundary **{start_dt.date()} to {end_dt.date()}**.")
-            else:
-                verdict_lines.append(f"- ⛔ **{total_oob} line item(s)** have dates OUTSIDE the tour's Start/End range and were marked NOT approved.")
-        else:
-            verdict_lines.append("- ⚠️ Tour Start/End date-time could not be detected — date-boundary check was skipped.")
-
-        if not boarding_day_summary.empty:
-            if boarding_claimed == boarding_approved:
-                verdict_lines.append(f"- ✅ Boarding(Food): all {df_boarding['Date'].nunique()} day(s) at or below the ₹{boarding_cap}/day cap.")
-            else:
-                verdict_lines.append(f"- ⚠️ Boarding(Food): claimed ₹{boarding_claimed} vs approved ₹{boarding_approved}.")
-
-        if not lodging_day_summary.empty:
-            nights_note = ""
-            if lodging_expected_nights is not None:
-                if lodging_actual_nights == lodging_expected_nights:
-                    nights_note = f" Night count ({lodging_actual_nights}) matches expected nights."
-                else:
-                    nights_note = f" ⚠️ {lodging_actual_nights} night(s) claimed vs {lodging_expected_nights} expected — please verify."
-            lodging_cap_note = "the DSIC bracket cap(s)" if dsic_active else f"₹{lodging_cap}/night cap"
-            if lodging_claimed == lodging_approved:
-                verdict_lines.append(f"- ✅ Lodging(Hotel): all nights within {lodging_cap_note}.{nights_note}")
-            else:
-                verdict_lines.append(f"- ⚠️ Lodging(Hotel): claimed ₹{lodging_claimed} vs approved ₹{lodging_approved}.{nights_note}")
-
-        if not df_lodging_relative.empty:
-            relative_cap_display = min(round(lodging_cap * LODGING_RELATIVE_PERCENT, 2), LODGING_RELATIVE_MAX_CAP) if not isinstance(lodging_cap, str) else "Actuals"
-            if lodging_relative_claimed == lodging_relative_approved:
-                verdict_lines.append(f"- ✅ Lodging(Relative): {lodging_relative_nights} night(s), within the 40%/₹{LODGING_RELATIVE_MAX_CAP} cap (₹{relative_cap_display}/day).")
-            else:
-                verdict_lines.append(f"- ⚠️ Lodging(Relative): claimed ₹{lodging_relative_claimed} vs approved ₹{lodging_relative_approved}.")
-
-        if not conveyance_detail.empty:
-            if dsic_active and conveyance_claimed != conveyance_approved:
-                verdict_lines.append(f"- ⚠️ Conveyance(Local): claimed ₹{conveyance_claimed} vs DSIC-capped approved ₹{conveyance_approved}.")
-            elif dsic_active:
-                verdict_lines.append(f"- ✅ Conveyance(Local): all within DSIC caps, total ₹{conveyance_approved}.")
-            else:
-                verdict_lines.append(f"- ✅ Conveyance(Local): {len(df_conveyance)} trip(s) on actuals, total ₹{conveyance_approved}.")
-        if not ticket_detail.empty:
-            verdict_lines.append(f"- ✅ Travel Ticket: {len(df_ticket)} ticket(s) on actuals, total ₹{ticket_approved}.")
-
-        st.markdown("\n".join(verdict_lines))
-
-    with tab_detail:
-        st.subheader("📁 Detailed Policy Breakdown")
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            st.markdown("**Boarding(Food) — Day-wise Factor Application**")
-            st.dataframe(boarding_day_summary, use_container_width=True, hide_index=True) if not boarding_day_summary.empty else st.caption("No boarding/food line items found.")
-
-            st.markdown("**Conveyance(Local) — Actuals**" if not dsic_active else "**Conveyance(Local) — DSIC Day-wise Cap Application**")
-            if dsic_active and not conveyance_day_summary.empty:
-                st.dataframe(conveyance_day_summary, use_container_width=True, hide_index=True)
-                if st.checkbox("Show individual conveyance line items", key=f"{key_prefix}_conv_detail"):
-                    st.dataframe(conveyance_detail[["Date", "Place", "Claimed Amount", "Distance (Km)"]], use_container_width=True, hide_index=True)
-            elif not conveyance_detail.empty:
-                st.dataframe(conveyance_detail[["Date", "Place", "Claimed Amount", "Approved Amount", "Distance (Km)"]], use_container_width=True, hide_index=True)
-            else:
-                st.caption("No conveyance line items found.")
-
-        with col_b:
-            st.markdown("**Lodging(Hotel) — Day-wise Cap Application**")
-            st.dataframe(lodging_day_summary, use_container_width=True, hide_index=True) if not lodging_day_summary.empty else st.caption("No lodging/hotel line items found.")
-
-            if not lodging_relative_day_summary.empty:
-                st.markdown("**Lodging(Relative) — 40% of General Lodging Cap (max Rs.400/day)**")
-                st.dataframe(lodging_relative_day_summary, use_container_width=True, hide_index=True)
-
-            st.markdown("**Travel Ticket — Actuals**")
-            st.dataframe(ticket_detail[["Date", "Place", "Claimed Amount", "Approved Amount"]], use_container_width=True, hide_index=True) if not ticket_detail.empty else st.caption("No travel ticket line items found.")
-
-        if st.checkbox("🔍 Show Raw Extracted Line Items (traceability)", key=f"{key_prefix}_raw"):
-            st.dataframe(expense_df[["SN", "Date", "Place", "Bucket", "Distance (Km)", "Claimed Amount", "Raw Row"]], use_container_width=True, hide_index=True)
-
-    with tab_bills:
-        st.subheader("📎 Bill Verification")
-        st.caption(
-            "Checks whether a bill/attachment was listed for each Lodging, Conveyance and Travel Ticket claim, "
-            "and whether any date embedded in the filename matches the claim date. This can only read the PDF's "
-            "text — bill images/PDFs are referenced by filename only, not embedded, so content can't be visually verified."
+        styled_jv = jv_summary_df.style.apply(_highlight_mismatch, axis=1).format(
+            {"Applied Amount": "₹{:,.2f}", "AI Approved Amount": "₹{:,.2f}"}
         )
-        if not bill_table.empty:
-            missing_count = int(bill_table["Status"].str.contains("No bill").sum())
-            mismatch_count = int(bill_table["Status"].str.contains("differs").sum())
-            b1, b2, b3 = st.columns(3)
-            b1.metric("Bills Required", len(bill_table))
-            b2.metric("Missing Bills", missing_count)
-            b3.metric("Filename-Date Mismatches", mismatch_count)
-            st.dataframe(bill_table, use_container_width=True, hide_index=True)
-        else:
-            st.caption("No Lodging/Conveyance/Travel Ticket claims requiring a bill were found.")
-
-        st.subheader("🚗 Conveyance Route & Rate Check")
-        st.caption("Origin -> Destination and Rs./Km from the claimed Distance, for a quick manual sanity check (no live map/geocoding is queried).")
-        st.dataframe(route_table, use_container_width=True, hide_index=True) if not route_table.empty else st.caption("No conveyance line items with route information were found.")
-
-    with tab_jv:
-        st.subheader("🔁 Reconciliation vs PDF's JV Detail Summary")
-        if jv_df.empty:
-            st.caption("No JV Detail summary block found in this PDF to reconcile against.")
-        else:
-            jv_grouped = jv_df.groupby("Bucket").agg(**{"JV Applied (Rs.)": ("JV Applied", "sum"), "JV Approved (Rs.)": ("JV Approved", "sum")}).reset_index()
-            computed = pd.DataFrame([
-                {"Bucket": "Boarding(Food)", "Expense Detail Claimed (Rs.)": boarding_claimed},
-                {"Bucket": "Lodging(Hotel)", "Expense Detail Claimed (Rs.)": lodging_claimed},
-                {"Bucket": "Lodging(Relative)", "Expense Detail Claimed (Rs.)": lodging_relative_claimed},
-                {"Bucket": "Conveyance(Local)", "Expense Detail Claimed (Rs.)": conveyance_claimed},
-                {"Bucket": "Travel Ticket", "Expense Detail Claimed (Rs.)": ticket_claimed},
-            ])
-            recon = computed.merge(jv_grouped, on="Bucket", how="left")
-            recon["JV Applied (Rs.)"] = recon["JV Applied (Rs.)"].fillna(0.0)
-            recon["JV Approved (Rs.)"] = recon["JV Approved (Rs.)"].fillna(0.0)
-            recon["Match?"] = recon.apply(lambda row: "✅ Match" if abs(row["Expense Detail Claimed (Rs.)"] - row["JV Applied (Rs.)"]) < 0.01 else "⚠️ Mismatch", axis=1)
-            st.dataframe(recon.rename(columns={"Bucket": "Expense Type"}), use_container_width=True, hide_index=True)
-
-    st.divider()
-    grand_delta = round(grand_approved - grand_claimed, 2)
-    st.subheader("🧮 Grand Total — Claimed vs Approved")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Grand Total Claimed (Rs.)", f"{grand_claimed:,.2f}")
-    m2.metric("Grand Total Approved (Rs.)", f"{grand_approved:,.2f}", delta=f"{grand_delta:,.2f}")
-    m3.metric("Policy Deduction (Rs.)", f"{round(grand_claimed - grand_approved, 2):,.2f}")
+        st.dataframe(styled_jv, use_container_width=True, hide_index=True)
+        st.markdown(f"**Grand Total** — Applied: ₹{grand_claimed:,.2f}  |  AI Approved: ₹{grand_approved:,.2f}")
+    else:
+        st.caption("No JV Detail line items found.")
 
     if header_info.get("Advance") is not None:
         balance = round(header_info["Advance"] - grand_approved, 2)
-        st.info(f"**Advance Received:** ₹{header_info['Advance']:,.2f}  |  **Approved Claim:** ₹{grand_approved:,.2f}  |  **Balance to be {'returned by employee' if balance >= 0 else 'reimbursed to employee'}:** ₹{abs(balance):,.2f}")
+        st.info(f"**Advance Received:** ₹{header_info['Advance']:,.2f}  |  **AI Approved Claim:** ₹{grand_approved:,.2f}  |  **Balance to be {'returned by employee' if balance >= 0 else 'reimbursed to employee'}:** ₹{abs(balance):,.2f}")
 
-    if header_info.get("PDF Grand Total") is not None and abs(header_info["PDF Grand Total"] - grand_claimed) > 0.01:
-        st.warning(f"⚠️ PDF's own Grand Total (₹{header_info['PDF Grand Total']:,.2f}) does not match the sum of parsed line items (₹{grand_claimed:,.2f}). Please verify manually.")
+    # ---------------------- Expenses Detail: red amount where a required bill is missing ----------------------
+    st.subheader("Expenses Detail")
+    st.caption("Amount highlighted red = required bill/voucher is missing for this line item (Boarding is exempt per Rule II.1).")
+
+    detail_cols = ["SN", "Date", "Place", "Bucket", "Mode", "Route Origin", "Route Destination", "Distance (Km)", "Claimed Amount", "Bill Filename"]
+    detail_df = expense_df[detail_cols].copy().sort_values("SN", key=lambda s: s.astype(int))
+    detail_df["Particulars / Remark"] = detail_df.apply(
+        lambda row: f"{row['Route Origin']} to {row['Route Destination']}" if pd.notna(row.get("Route Origin")) else "", axis=1
+    )
+    detail_df["Bill Copy"] = detail_df["Bill Filename"].apply(lambda v: v if pd.notna(v) else "-")
+    detail_df["Missing Bill"] = detail_df.apply(
+        lambda row: row["Bucket"] in BUCKETS_REQUIRING_BILL and pd.isna(row["Bill Filename"]), axis=1
+    )
+    display_df = detail_df[["SN", "Date", "Place", "Bucket", "Particulars / Remark", "Mode", "Distance (Km)", "Claimed Amount", "Bill Copy", "Missing Bill"]].rename(
+        columns={"Bucket": "Expense Type", "Claimed Amount": "Amount (Rs.)"}
+    )
+
+    def _highlight_missing_bill(row):
+        styles = [""] * len(row)
+        if row["Missing Bill"]:
+            amount_idx = display_df.columns.get_loc("Amount (Rs.)")
+            styles[amount_idx] = "background-color: #fdecec; color: #b3261e; font-weight: 700;"
+        return styles
+
+    styled_detail = display_df.drop(columns=["Missing Bill"]).style.apply(
+        lambda _: _highlight_missing_bill(display_df.loc[_.name]), axis=1
+    ).format({"Amount (Rs.)": "₹{:,.2f}"})
+    st.dataframe(styled_detail, use_container_width=True, hide_index=True, height=min(35 * len(display_df) + 40, 900))
 
 
 # ----------------------------------------------------------------------
