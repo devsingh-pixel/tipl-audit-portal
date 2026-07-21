@@ -1156,15 +1156,17 @@ def render_results(r, key_prefix):
         columns={"Bucket": "Expense Type", "Claimed Amount": "Amount (Rs.)"}
     )
 
-    def _highlight_missing_bill(row):
-        styles = [""] * len(row)
-        if row["Missing Bill"]:
-            amount_idx = display_df.columns.get_loc("Amount (Rs.)")
-            styles[amount_idx] = "background-color: #fdecec; color: #b3261e; font-weight: 700;"
+    plot_df = display_df.drop(columns=["Missing Bill"])
+    amount_col_idx = plot_df.columns.get_loc("Amount (Rs.)")
+
+    def _highlight_missing_bill(row_index):
+        styles = [""] * len(plot_df.columns)
+        if display_df.loc[row_index, "Missing Bill"]:
+            styles[amount_col_idx] = "background-color: #fdecec; color: #b3261e; font-weight: 700;"
         return styles
 
-    styled_detail = display_df.drop(columns=["Missing Bill"]).style.apply(
-        lambda _: _highlight_missing_bill(display_df.loc[_.name]), axis=1
+    styled_detail = plot_df.style.apply(
+        lambda row: _highlight_missing_bill(row.name), axis=1
     ).format({"Amount (Rs.)": "₹{:,.2f}"})
     st.dataframe(styled_detail, use_container_width=True, hide_index=True, height=min(35 * len(display_df) + 40, 900))
 
@@ -1194,15 +1196,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown("### View Tour Report")
-st.caption("TIPL Travel Expense Auto-Audit Engine — TE Rules w.e.f. 1-Apr-2025 built in. Prototype for the 'Tour Audit AI' stage; other stages below are placeholders your IT team would wire to the live database.")
-
-STATIC_STAGES_BEFORE = [("Fresh", 23), ("Pending For DSIC CEO Office Approval", 0), ("Pending For Document Received", 48)]
-STATIC_STAGES_AFTER = [("To Be Audited", 18), ("Management Review", 0), ("To Be Passed", 0), ("To Be Authorized", 0), ("Closed", 171)]
-
-for stage_name, count in STATIC_STAGES_BEFORE:
-    with st.expander(f"{stage_name} ({count})"):
-        st.caption("Connects to your live TIPL database in production — static placeholder in this standalone demo.")
+st.markdown("### Tour Audit AI")
+st.caption("TIPL Travel Expense Auto-Audit Engine — TE Rules w.e.f. 1-Apr-2025 built in. This is only the 'Tour Audit AI' stage — your IT team will insert this as one row into the live portal, directly under the existing 'Pending For Document Received' stage.")
 
 # ---------------------- Tour Audit AI (the functional stage) ----------------------
 if "tour_audit_results" not in st.session_state:
@@ -1211,7 +1206,7 @@ if "tour_audit_filenames" not in st.session_state:
     st.session_state.tour_audit_filenames = set()
 
 with st.expander(f"🤖 Tour Audit AI ({len(st.session_state.tour_audit_results)})", expanded=True):
-    st.caption("Add one or more Tour Expense (TR) PDFs below — each is auto-audited immediately and appears as a row here, just like the stages above. In production this stage would instead read tours directly from the database, with no upload step at all.")
+    st.caption("Add one or more Tour Expense (TR) PDFs below — each is auto-audited immediately and appears as a row here. In production this stage would instead read tours directly from the database (fed by your existing 'Pending For Document Received' stage), with no upload step at all.")
     uploaded_files = st.file_uploader(
         "Add Tour Expense (TR) PDFs to the audit queue", type=["pdf"], accept_multiple_files=True, key="tour_audit_uploader"
     )
@@ -1240,34 +1235,24 @@ with st.expander(f"🤖 Tour Audit AI ({len(st.session_state.tour_audit_results)
         table_rows = []
         for r in st.session_state.tour_audit_results:
             hi = r.get("header_info") or {}
-            if r.get("error"):
-                audit_result = "❌ " + r["error"][:40]
-            else:
-                audit_result = "✅ Clean" if r.get("is_clean") else f"❌ {len(r.get('issues', []))} issue(s)"
             table_rows.append({
                 "Tour No.": hi.get("Tour No") or "—",
                 "Employee Name": hi.get("Employee Name") or "—",
                 "Start Date": hi.get("Start Date Raw") or "—",
                 "End Date": hi.get("End Date Raw") or "—",
                 "Tour Type": hi.get("Employee Department") or "—",
-                "Audit Result": audit_result,
             })
         st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+        st.caption("Click a tour below to open its full report (JV Detail + Expenses Detail).")
 
         st.markdown("---")
         for idx, r in enumerate(st.session_state.tour_audit_results):
             hi = r.get("header_info") or {}
-            status_icon = "✅" if (not r.get("error") and r.get("is_clean")) else "❌"
-            label = f"{status_icon} {hi.get('Tour No') or r.get('filename')} — {hi.get('Employee Name') or 'Unknown'}"
+            label = f"📄 {hi.get('Tour No') or r.get('filename')} — {hi.get('Employee Name') or 'Unknown'}"
             with st.expander(label):
                 if r.get("error"):
                     st.error(r["error"])
                     continue
-
-                if r["issues"]:
-                    st.warning("Issues found: " + "; ".join(r["issues"]))
-                else:
-                    st.success("No issues found — fully compliant with TE Rules.")
 
                 oc1, oc2, oc3 = st.columns(3)
                 with oc1:
@@ -1302,7 +1287,3 @@ with st.expander(f"🤖 Tour Audit AI ({len(st.session_state.tour_audit_results)
             st.session_state.tour_audit_results = []
             st.session_state.tour_audit_filenames = set()
             st.rerun()
-
-for stage_name, count in STATIC_STAGES_AFTER:
-    with st.expander(f"{stage_name} ({count})"):
-        st.caption("Connects to your live TIPL database in production — static placeholder in this standalone demo.")
