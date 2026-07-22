@@ -390,14 +390,17 @@ def parse_expense_row(row):
     # fragment ("22.11") that would otherwise be picked up as the amount.
     # Requiring the ENTIRE cell to match rules that out, since filenames
     # always carry extra letters/underscores/extensions.
+    # NOTE: some PDFs mis-render their table grid so the Amount column simply
+    # never shows up in the extracted cells at all (column boundary detection
+    # failure). Rather than discard the whole line item here, leave amount as
+    # None - parse_tr_pdf() has a raw-text fallback keyed on SN that recovers
+    # these before finally dropping anything still unresolved.
     amount = None
     for c in reversed(cells):
         c_clean = c.replace("\n", "").strip()
         if AMOUNT_PATTERN.fullmatch(c_clean):
             amount = float(c_clean)
             break
-    if amount is None:
-        return None
 
     distance = None
     for c in cells[1:]:
@@ -432,18 +435,32 @@ def parse_expense_row(row):
 
     # Route (Origin -> Destination): the remark cell containing " to " as a
     # standalone word, e.g. "Hotel to Plant." or "Vijayawada to nellore."
+    # Only meaningful for Conveyance/Travel Ticket - a Lodging row's Hotel
+    # Name cell can coincidentally contain " to " (e.g. "Hotel to Kaushalya")
+    # and would otherwise be misread as a route.
     route_origin, route_destination = None, None
-    for c in cells:
-        cs = c.replace("\n", " ").strip()
-        m = re.search(r"^(.*?)\bto\b(.*?)[\.\s]*$", cs, re.IGNORECASE)
-        if m and len(cs) < 120 and " to " in f" {cs.lower()} ":
-            origin_raw = m.group(1).strip(" .")
-            dest_raw = m.group(2).strip(" .")
-            # strip leading mode-of-travel / filler words from the origin
-            origin_clean = re.sub(r"^(bus|auto|taxi|train)\s+(from\s+)?|^from\s+", "", origin_raw, flags=re.IGNORECASE).strip()
-            if origin_clean and dest_raw:
-                route_origin, route_destination = origin_clean, dest_raw
-                break
+    if bucket in ("Conveyance(Local)", "Travel Ticket"):
+        for c in cells:
+            cs = c.replace("\n", " ").strip()
+            m = re.search(r"^(.*?)\bto\b(.*?)[\.\s]*$", cs, re.IGNORECASE)
+            if m and len(cs) < 120 and " to " in f" {cs.lower()} ":
+                origin_raw = m.group(1).strip(" .")
+                dest_raw = m.group(2).strip(" .")
+                # strip leading mode-of-travel / filler words from the origin
+                origin_clean = re.sub(r"^(bus|auto|taxi|train)\s+(from\s+)?|^from\s+", "", origin_raw, flags=re.IGNORECASE).strip()
+                if origin_clean and dest_raw:
+                    route_origin, route_destination = origin_clean, dest_raw
+                    break
+
+    # Hotel Name: for Lodging(Hotel) rows, the "Name of Hotel/Rest." column is
+    # typically the LAST non-empty cell (after SN/Date/Place/Bucket/Remark).
+    # Used to detect when one bill actually covers several consecutive nights
+    # at the same hotel (so only the first night needs its own bill listed).
+    hotel_name = None
+    if bucket == "Lodging(Hotel)" and len(cells) > 4:
+        candidate = cells[-1].replace("\n", " ").strip()
+        if candidate and candidate != "-" and not candidate.isdigit():
+            hotel_name = candidate
 
     # Bill Copy filename: the cell (if any) ending in a recognizable file extension
     bill_filename = None
@@ -467,6 +484,7 @@ def parse_expense_row(row):
         "Mode": mode,
         "Route Origin": route_origin,
         "Route Destination": route_destination,
+        "Hotel Name": hotel_name,
         "Distance (Km)": distance,
         "Claimed Amount": amount,
         "Bill Filename": bill_filename,
@@ -495,6 +513,50 @@ def parse_jv_row(row):
     return {"Bucket": bucket, "Account Code": cells[1], "JV Applied": applied, "JV Approved": approved}
 
 
+RAW_TEXT_RECORD_PATTERN = re.compile(
+    r"(\d{4}-\d{2}-)\s*\n\s*(\d{1,3})\s+(.+?)\s+(\d+\.\d{2})\s*\n\s*(\d{2})\b",
+    re.S,
+)
+
+
+def extract_amounts_from_raw_text(full_text):
+    """Fallback for PDFs whose table grid mis-detects the Amount column (the
+    cell comes back empty/None even though the value is clearly printed in
+    the page text). Recovers {SN: (date, amount)} straight from the text
+    stream, using the same 'YYYY-MM-\\n...\\nDD' line-wrapping pattern the
+    underlying PDF layout produces for every Expense Detail record."""
+    recovered = {}
+    for year_month, sn, _middle, amount_str, day in RAW_TEXT_RECORD_PATTERN.findall(full_text):
+        try:
+            recovered[sn] = (f"{year_month}{day}", float(amount_str))
+        except ValueError:
+            continue
+    return recovered
+
+
+def extract_amounts_positional(full_text, count_needed):
+    """Second-tier fallback for PDFs where even the SN-keyed raw-text pattern
+    can't match (this specific export's text stream doesn't keep the SN
+    adjacent to its date/amount at all - only a page number is). Recovers
+    every currency-shaped amount within the 'Expenses Detail' section (never
+    the JV Detail summary above it or the Grand Total below it) and returns
+    them in document order. Only usable when the count matches EXACTLY the
+    number of rows needing recovery - otherwise a 1:1 positional assumption
+    would silently misassign amounts, so this returns None instead of guessing."""
+    lower_text = full_text.lower()
+    idx_start = lower_text.find("expenses detail")
+    if idx_start == -1:
+        idx_start = lower_text.find("expense detail")
+    idx_end = full_text.find("Grand Total")
+    if idx_end == -1 or idx_end < idx_start:
+        idx_end = len(full_text)
+    section = full_text[idx_start:idx_end] if idx_start != -1 else full_text
+    amounts = [float(a) for a in AMOUNT_PATTERN.findall(section)]
+    if len(amounts) == count_needed:
+        return amounts
+    return None
+
+
 def parse_tr_pdf(file_bytes):
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         full_text = "\n".join((page.extract_text() or "") for page in pdf.pages)
@@ -511,6 +573,38 @@ def parse_tr_pdf(file_bytes):
         parsed = parse_expense_row(row)
         if parsed:
             expense_rows.append(parsed)
+
+    # Fallback recovery: some PDFs' table grid never captures the Amount
+    # cell at all (it comes back None even though the row is otherwise
+    # intact). Fill those in from the raw text stream instead of losing
+    # the whole line item.
+    if any(r["Claimed Amount"] is None for r in expense_rows):
+        fallback_map = extract_amounts_from_raw_text(full_text)
+        for r in expense_rows:
+            if r["Claimed Amount"] is None:
+                recovered = fallback_map.get(r["SN"])
+                if recovered:
+                    recovered_date, recovered_amount = recovered
+                    r["Claimed Amount"] = recovered_amount
+                    if not r.get("Date"):
+                        r["Date"] = recovered_date
+                        try:
+                            r["Date_Parsed"] = datetime.strptime(recovered_date, "%Y-%m-%d")
+                        except ValueError:
+                            pass
+
+    # Anything still unresolved after the SN-keyed fallback: try the
+    # positional fallback (only safe when EVERY row still needs an amount,
+    # since that's the only case where a strict 1:1 in-order mapping holds).
+    still_missing = [r for r in expense_rows if r["Claimed Amount"] is None]
+    if still_missing and len(still_missing) == len(expense_rows):
+        positional_amounts = extract_amounts_positional(full_text, len(expense_rows))
+        if positional_amounts:
+            for r, amt in zip(expense_rows, positional_amounts):
+                r["Claimed Amount"] = amt
+
+    # Anything still unresolved after both fallbacks can't be audited reliably - drop it.
+    expense_rows = [r for r in expense_rows if r["Claimed Amount"] is not None]
 
     jv_rows = []
     for row in all_rows:
@@ -1139,9 +1233,39 @@ def render_results(r, key_prefix):
         balance = round(header_info["Advance"] - grand_approved, 2)
         st.info(f"**Advance Received:** ₹{header_info['Advance']:,.2f}  |  **AI Approved Claim:** ₹{grand_approved:,.2f}  |  **Balance to be {'returned by employee' if balance >= 0 else 'reimbursed to employee'}:** ₹{abs(balance):,.2f}")
 
-    # ---------------------- Expenses Detail: red amount where a required bill is missing ----------------------
+    # ---------------------- Expenses Detail: red amount where a bill is missing OR the rate looks abnormally high ----------------------
     st.subheader("Expenses Detail")
-    st.caption("Amount highlighted red = required bill/voucher is missing for this line item (Boarding is exempt per Rule II.1).")
+    st.caption(
+        "Amount highlighted red = either the required bill/voucher is missing (Boarding is exempt per Rule II.1), "
+        "or - for Conveyance - the claimed Rs./Km looks unusually high and needs manual review. "
+        "Note: if ONE night of a multi-night hotel stay has a bill attached, the other consecutive nights of that "
+        "same stay are treated as covered by it, not flagged as missing."
+    )
+
+    def _lodging_bill_coverage(df_bucket):
+        """Consecutive calendar dates (no gap) count as ONE stay. If any date
+        in that stay has a bill, every date in the same stay is covered -
+        hotels commonly issue one invoice for a multi-night stay, attached
+        to only one of the claim rows."""
+        covered = set()
+        if df_bucket.empty:
+            return covered
+        dates_sorted = sorted(df_bucket["Date"].unique())
+        has_bill_by_date = {d: bool(df_bucket.loc[df_bucket["Date"] == d, "Bill Filename"].notna().any()) for d in dates_sorted}
+        run, prev_date = [], None
+        for d in dates_sorted:
+            this_date = datetime.strptime(d, "%Y-%m-%d").date()
+            if prev_date is not None and (this_date - prev_date).days > 1:
+                if any(has_bill_by_date[x] for x in run):
+                    covered.update(run)
+                run = []
+            run.append(d)
+            prev_date = this_date
+        if any(has_bill_by_date[x] for x in run):
+            covered.update(run)
+        return covered
+
+    lodging_covered_dates = _lodging_bill_coverage(df_lodging) | _lodging_bill_coverage(df_lodging_relative)
 
     detail_cols = ["SN", "Date", "Place", "Bucket", "Mode", "Route Origin", "Route Destination", "Distance (Km)", "Claimed Amount", "Bill Filename"]
     detail_df = expense_df[detail_cols].copy().sort_values("SN", key=lambda s: s.astype(int))
@@ -1149,26 +1273,62 @@ def render_results(r, key_prefix):
         lambda row: f"{row['Route Origin']} to {row['Route Destination']}" if pd.notna(row.get("Route Origin")) else "", axis=1
     )
     detail_df["Bill Copy"] = detail_df["Bill Filename"].apply(lambda v: v if pd.notna(v) else "-")
-    detail_df["Missing Bill"] = detail_df.apply(
-        lambda row: row["Bucket"] in BUCKETS_REQUIRING_BILL and pd.isna(row["Bill Filename"]), axis=1
-    )
-    display_df = detail_df[["SN", "Date", "Place", "Bucket", "Particulars / Remark", "Mode", "Distance (Km)", "Claimed Amount", "Bill Copy", "Missing Bill"]].rename(
+
+    def _is_missing_bill(row):
+        if row["Bucket"] not in BUCKETS_REQUIRING_BILL or pd.notna(row["Bill Filename"]):
+            return False
+        if row["Bucket"] in ("Lodging(Hotel)", "Lodging(Relative)") and row["Date"] in lodging_covered_dates:
+            return False
+        return True
+
+    def _conveyance_rate(row):
+        if row["Bucket"] != "Conveyance(Local)":
+            return None
+        try:
+            distance = float(row["Distance (Km)"]) if pd.notna(row["Distance (Km)"]) else None
+        except (TypeError, ValueError):
+            distance = None
+        if not distance or distance <= 0:
+            return None
+        return row["Claimed Amount"] / distance
+
+    detail_df["Missing Bill"] = detail_df.apply(_is_missing_bill, axis=1)
+    detail_df["Rate Per Km"] = detail_df.apply(_conveyance_rate, axis=1)
+    detail_df["High Rate"] = detail_df["Rate Per Km"].apply(lambda v: v is not None and v > 50)
+
+    def _flag_text(row):
+        parts = []
+        if row["Missing Bill"]:
+            parts.append("⛔ No bill/voucher")
+        if row["High Rate"]:
+            parts.append(f"⚠️ High rate (₹{row['Rate Per Km']:.1f}/km)")
+        return " | ".join(parts)
+
+    detail_df["Flag"] = detail_df.apply(_flag_text, axis=1)
+
+    display_df = detail_df[["SN", "Date", "Place", "Bucket", "Particulars / Remark", "Mode", "Distance (Km)", "Claimed Amount", "Bill Copy", "Flag", "Missing Bill", "High Rate"]].rename(
         columns={"Bucket": "Expense Type", "Claimed Amount": "Amount (Rs.)"}
     )
 
-    plot_df = display_df.drop(columns=["Missing Bill"])
+    plot_df = display_df.drop(columns=["Missing Bill", "High Rate"])
     amount_col_idx = plot_df.columns.get_loc("Amount (Rs.)")
 
-    def _highlight_missing_bill(row_index):
+    def _highlight_row(row_index):
         styles = [""] * len(plot_df.columns)
-        if display_df.loc[row_index, "Missing Bill"]:
+        if display_df.loc[row_index, "Missing Bill"] or display_df.loc[row_index, "High Rate"]:
             styles[amount_col_idx] = "background-color: #fdecec; color: #b3261e; font-weight: 700;"
         return styles
 
     styled_detail = plot_df.style.apply(
-        lambda row: _highlight_missing_bill(row.name), axis=1
+        lambda row: _highlight_row(row.name), axis=1
     ).format({"Amount (Rs.)": "₹{:,.2f}"})
     st.dataframe(styled_detail, use_container_width=True, hide_index=True, height=min(35 * len(display_df) + 40, 900))
+
+    st.caption(
+        "⚠️ Note on bill verification: this only checks whether a filename was listed and whether consecutive-night "
+        "lodging is covered by a nearby bill - it cannot open, fetch, or visually inspect the actual bill image/PDF, "
+        "since those files are referenced by name only and are not embedded in or downloadable from this document."
+    )
 
 
 # ----------------------------------------------------------------------
