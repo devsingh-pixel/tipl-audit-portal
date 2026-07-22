@@ -1392,28 +1392,61 @@ with st.expander(f"🤖 Tour Audit AI ({len(st.session_state.tour_audit_results)
     if not st.session_state.tour_audit_results:
         st.info("No tours in the audit queue yet. Add PDF(s) above to see them auto-audited below.")
     else:
-        table_rows = []
-        for r in st.session_state.tour_audit_results:
-            hi = r.get("header_info") or {}
-            table_rows.append({
-                "Tour No.": hi.get("Tour No") or "—",
-                "Employee Name": hi.get("Employee Name") or "—",
-                "Start Date": hi.get("Start Date Raw") or "—",
-                "End Date": hi.get("End Date Raw") or "—",
-                "Tour Type": hi.get("Employee Department") or "—",
-            })
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
-        st.caption("Click a tour below to open its full report (JV Detail + Expenses Detail).")
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stButton"] > button {
+                background: none;
+                border: none;
+                padding: 0;
+                color: #1a5fb4;
+                font-weight: 600;
+                text-decoration: none;
+            }
+            div[data-testid="stButton"] > button:hover {
+                text-decoration: underline;
+                color: #0d3d75;
+            }
+            div[data-testid="stButton"] > button:focus:not(:active) {
+                color: #1a5fb4;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        st.markdown("---")
+        if "open_tour_idx" not in st.session_state:
+            st.session_state.open_tour_idx = None
+
+        hc1, hc2, hc3, hc4, hc5 = st.columns([1.3, 1.6, 1.2, 1.2, 1.2])
+        hc1.markdown("**Tour No.**")
+        hc2.markdown("**Employee Name**")
+        hc3.markdown("**Start Date**")
+        hc4.markdown("**End Date**")
+        hc5.markdown("**Tour Type**")
+        st.divider()
+
         for idx, r in enumerate(st.session_state.tour_audit_results):
             hi = r.get("header_info") or {}
-            label = f"📄 {hi.get('Tour No') or r.get('filename')} — {hi.get('Employee Name') or 'Unknown'}"
-            with st.expander(label):
-                if r.get("error"):
-                    st.error(r["error"])
-                    continue
+            tour_no = hi.get("Tour No") or r.get("filename") or f"Tour {idx + 1}"
+            rc1, rc2, rc3, rc4, rc5 = st.columns([1.3, 1.6, 1.2, 1.2, 1.2])
+            with rc1:
+                if st.button(tour_no, key=f"open_{idx}"):
+                    st.session_state.open_tour_idx = None if st.session_state.open_tour_idx == idx else idx
+            rc2.write(hi.get("Employee Name") or "—")
+            rc3.write(hi.get("Start Date Raw") or "—")
+            rc4.write(hi.get("End Date Raw") or "—")
+            rc5.write(hi.get("Employee Department") or "—")
 
+        st.caption("Click a Tour No. above to open its full report (JV Detail + Expenses Detail). Nothing shows until you click.")
+
+        idx = st.session_state.open_tour_idx
+        if idx is not None and 0 <= idx < len(st.session_state.tour_audit_results):
+            r = st.session_state.tour_audit_results[idx]
+            st.markdown("---")
+            if r.get("error"):
+                st.error(r["error"])
+            else:
                 oc1, oc2, oc3 = st.columns(3)
                 with oc1:
                     cat_override_on = st.checkbox("Override Designation Slab", key=f"cat_ov_{idx}")
@@ -1446,4 +1479,5 @@ with st.expander(f"🤖 Tour Audit AI ({len(st.session_state.tour_audit_results)
         if st.button("🗑️ Clear Audit Queue"):
             st.session_state.tour_audit_results = []
             st.session_state.tour_audit_filenames = set()
+            st.session_state.open_tour_idx = None
             st.rerun()
