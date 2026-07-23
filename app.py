@@ -17,7 +17,10 @@ Run with:  streamlit run app.py
 """
 
 import io
+import os
+import pickle
 import re
+import uuid
 from datetime import datetime
 
 import pandas as pd
@@ -33,6 +36,36 @@ except ImportError:
 # PAGE CONFIG
 # ----------------------------------------------------------------------
 st.set_page_config(page_title="TIPL Travel Expense Auto-Audit Engine", page_icon="🧾", layout="wide")
+
+# ----------------------------------------------------------------------
+# ON-DISK TOUR CACHE — lets a Tour No. link open in a NEW browser tab.
+# Streamlit's session_state is per-connection, so a new tab starts a blank
+# session and would lose the uploaded PDF's results entirely. Instead, each
+# audited tour is pickled to disk (shared by the one running app instance)
+# keyed by a random tour_id; the link is "?tour_id=<id>", and any tab/session
+# that loads with that query param renders ONLY that tour's report.
+# ----------------------------------------------------------------------
+CACHE_DIR = "/tmp/tipl_tour_cache"
+
+
+def save_tour_cache(tour_id, entry):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(os.path.join(CACHE_DIR, f"{tour_id}.pkl"), "wb") as f:
+            pickle.dump(entry, f)
+    except OSError:
+        pass
+
+
+def load_tour_cache(tour_id):
+    path = os.path.join(CACHE_DIR, f"{tour_id}.pkl")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except (OSError, pickle.PickleError):
+        return None
 
 
 # ----------------------------------------------------------------------
@@ -1356,6 +1389,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+query_tour_id = st.query_params.get("tour_id")
+if query_tour_id:
+    cached_entry = load_tour_cache(query_tour_id)
+    st.markdown("[← Back to Tour Audit AI queue](/)")
+    if cached_entry is None:
+        st.error("This report link has expired or the app was restarted. Please reopen the tour from the Tour Audit AI queue.")
+        st.stop()
+    if cached_entry.get("error"):
+        st.error(cached_entry["error"])
+        st.stop()
+    render_results(cached_entry, key_prefix="standalone")
+    st.stop()
+
 st.markdown("### Tour Audit AI")
 st.caption("TIPL Travel Expense Auto-Audit Engine — TE Rules w.e.f. 1-Apr-2025 built in. This is only the 'Tour Audit AI' stage — your IT team will insert this as one row into the live portal, directly under the existing 'Pending For Document Received' stage.")
 
@@ -1386,6 +1432,12 @@ with st.expander(f"🤖 Tour Audit AI ({len(st.session_state.tour_audit_results)
                     entry["filename"] = f.name
             except Exception as exc:
                 entry = {"error": f"Could not parse this PDF: {exc}", "header_info": {}, "filename": f.name}
+
+            tour_no_raw = (entry.get("header_info") or {}).get("Tour No") or f.name
+            tour_id = re.sub(r"[^A-Za-z0-9_-]", "_", tour_no_raw)
+            entry["tour_id"] = tour_id
+            save_tour_cache(tour_id, entry)
+
             st.session_state.tour_audit_results.append(entry)
             st.session_state.tour_audit_filenames.add(f.name)
 
@@ -1415,9 +1467,6 @@ with st.expander(f"🤖 Tour Audit AI ({len(st.session_state.tour_audit_results)
             unsafe_allow_html=True,
         )
 
-        if "open_tour_idx" not in st.session_state:
-            st.session_state.open_tour_idx = None
-
         hc1, hc2, hc3, hc4, hc5 = st.columns([1.3, 1.6, 1.2, 1.2, 1.2])
         hc1.markdown("**Tour No.**")
         hc2.markdown("**Employee Name**")
@@ -1429,55 +1478,26 @@ with st.expander(f"🤖 Tour Audit AI ({len(st.session_state.tour_audit_results)
         for idx, r in enumerate(st.session_state.tour_audit_results):
             hi = r.get("header_info") or {}
             tour_no = hi.get("Tour No") or r.get("filename") or f"Tour {idx + 1}"
+            tour_id = r.get("tour_id")
             rc1, rc2, rc3, rc4, rc5 = st.columns([1.3, 1.6, 1.2, 1.2, 1.2])
             with rc1:
-                if st.button(tour_no, key=f"open_{idx}"):
-                    st.session_state.open_tour_idx = None if st.session_state.open_tour_idx == idx else idx
+                if tour_id:
+                    st.markdown(
+                        f'<a href="?tour_id={tour_id}" target="_blank" '
+                        f'style="color:#1a5fb4;font-weight:600;text-decoration:none;">{tour_no}</a>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.write(tour_no)
             rc2.write(hi.get("Employee Name") or "—")
             rc3.write(hi.get("Start Date Raw") or "—")
             rc4.write(hi.get("End Date Raw") or "—")
             rc5.write(hi.get("Employee Department") or "—")
 
-        st.caption("Click a Tour No. above to open its full report (JV Detail + Expenses Detail). Nothing shows until you click.")
-
-        idx = st.session_state.open_tour_idx
-        if idx is not None and 0 <= idx < len(st.session_state.tour_audit_results):
-            r = st.session_state.tour_audit_results[idx]
-            st.markdown("---")
-            if r.get("error"):
-                st.error(r["error"])
-            else:
-                oc1, oc2, oc3 = st.columns(3)
-                with oc1:
-                    cat_override_on = st.checkbox("Override Designation Slab", key=f"cat_ov_{idx}")
-                    cat_override = None
-                    if cat_override_on:
-                        sel = st.selectbox("Category", [f"{s['category']}: {s['name']}" for s in SLAB_TABLE], key=f"cat_sel_{idx}")
-                        cat_override = int(sel.split(":")[0])
-                with oc2:
-                    place_override_on = st.checkbox("Override Place Category", key=f"place_ov_{idx}")
-                    place_override = None
-                    if place_override_on:
-                        place_override = st.selectbox("Place Category", ["Other", "State Capital", "Metro"], key=f"place_sel_{idx}")
-                with oc3:
-                    dsic_override_on = False
-                    dsic_override = None
-                    if r.get("dsic_active"):
-                        dsic_override_on = st.checkbox("Override DSIC Tier", key=f"dsic_ov_{idx}")
-                        if dsic_override_on:
-                            dsel = st.selectbox("Tier", ["Tier 1 (highest)", "Tier 2 (middle)", "Tier 3 (lowest)"], key=f"dsic_sel_{idx}")
-                            dsic_override = {"Tier 1 (highest)": 0, "Tier 2 (middle)": 1, "Tier 3 (lowest)": 2}[dsel]
-
-                if cat_override_on or place_override_on or dsic_override_on:
-                    policy_params = resolve_policy_params(r["header_info"], r["expense_df"], cat_override, place_override, dsic_override)
-                    r = compute_audit(r["header_info"], r["expense_df"], r["jv_df"], policy_params)
-                    r["filename"] = st.session_state.tour_audit_results[idx].get("filename")
-
-                render_results(r, key_prefix=str(idx))
+        st.caption("Click a Tour No. above to open its full report in a new tab (JV Detail + Expenses Detail).")
 
         st.markdown("---")
         if st.button("🗑️ Clear Audit Queue"):
             st.session_state.tour_audit_results = []
             st.session_state.tour_audit_filenames = set()
-            st.session_state.open_tour_idx = None
             st.rerun()
