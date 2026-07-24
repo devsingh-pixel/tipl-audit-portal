@@ -1207,17 +1207,22 @@ def render_results(r, key_prefix):
     ticket_claimed, ticket_approved = r["ticket_claimed"], r["ticket_approved"]
     grand_claimed, grand_approved = r["grand_claimed"], r["grand_approved"]
 
-    # ---------------------- Header card (mirrors the portal's "Information" block) ----------------------
+    # ---------------------- Header card (mirrors the PDF's own "Information" block) ----------------------
     st.subheader("🗂️ Information")
-    h1, h2, h3, h4, h5 = st.columns(5)
-    h1.metric("Tour No.", header_info.get("Tour No") or "—")
-    h2.metric("Employee", header_info.get("Employee Name") or "—")
-    h3.metric("Designation", header_info.get("Designation") or "—")
-    h4.metric("Days", header_info.get("Days") or "—")
-    h5.metric("Department", header_info.get("Employee Department") or "—")
-    d1, d2 = st.columns(2)
-    d1.info(f"**Start Date:** {start_dt.strftime('%d/%m/%Y %H:%M:%S') if start_dt else header_info.get('Start Date Raw', 'Not detected')}")
-    d2.info(f"**End Date:** {end_dt.strftime('%d/%m/%Y %H:%M:%S') if end_dt else header_info.get('End Date Raw', 'Not detected')}")
+    st.markdown(
+        f"**Tour No.** {header_info.get('Tour No') or '—'}&nbsp;&nbsp;&nbsp;"
+        f"**Employee Name:** {header_info.get('Employee Name') or '—'}&nbsp;&nbsp;&nbsp;"
+        f"**Employee ID:** {header_info.get('Employee ID') or '—'}&nbsp;&nbsp;&nbsp;"
+        f"**Employee Department:** {header_info.get('Employee Department') or '—'}"
+    )
+    st.markdown(
+        f"**Start Date:** {header_info.get('Start Date Raw') or '—'}&nbsp;&nbsp;&nbsp;"
+        f"**End Date:** {header_info.get('End Date Raw') or '—'}"
+    )
+    st.markdown(
+        f"**Designation:** {header_info.get('Designation') or '—'}&nbsp;&nbsp;&nbsp;"
+        f"**Days:** {header_info.get('Days') or '—'}"
+    )
     if dsic_active:
         st.caption(f"🔧 DSIC tour — Lodging/Conveyance audited under TE Rules Note 3 (Tier {dsic_tier + 1} of 3, {place_category}); Boarding uses the general table (₹{boarding_cap}/day).")
 
